@@ -23,6 +23,7 @@ int main() {
           problem.measurements,
           problem.initial_guess.size());
 
+  // Keep the current rotations fixed and solve only for t*(R).
   const Eigen::MatrixXd optimal_translations =
       recoverOptimalTranslations(
           problem.initial_guess,
@@ -38,12 +39,14 @@ int main() {
         optimal_translations.col(i);
   }
 
+  // Cost at the original perturbed state.
   const double original_cost =
       evaluatePgo(
           problem.initial_guess,
           problem.measurements)
           .total;
 
+  // Explicit PGO cost after replacing translations with t*(R).
   const double explicit_recovered_cost =
       evaluatePgo(
           recovered_state,
@@ -54,6 +57,7 @@ int main() {
       buildRotationStateMatrix(
           problem.initial_guess);
 
+  // Reduced rotation-only objective: trace(R * Q * R^T).
   const double simplified_cost =
       evaluateSimplifiedQuadraticCost(
           R,
@@ -79,6 +83,8 @@ int main() {
       << simplified_cost
       << '\n';
 
+  // Main equivalence check:
+  // F(R, t*(R)) should match trace(R * Q * R^T).
   std::cout
       << "explicit vs simplified diff:     "
       << std::abs(
@@ -93,6 +99,8 @@ int main() {
              .norm()
       << '\n';
 
+  // Pi should behave as an orthogonal projector:
+  // Pi^T = Pi and Pi^2 = Pi.
   std::cout
       << "Pi symmetry error:               "
       << (simplified.Pi -
