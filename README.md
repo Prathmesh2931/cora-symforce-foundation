@@ -1,8 +1,8 @@
 # CORA / SE-Sync SymForce Foundation
 
-A small C++ reference implementation for studying and validating the pose-graph optimization formulations used in SE-Sync, with the longer-term goal of extending the same validated formulation toward CORA and SymForce-generated C++.
+A small C++ reference implementation for understanding and validating the pose-graph optimization formulations used in SE-Sync, with the longer-term goal of extending the same formulation toward CORA and SymForce-generated C++.
 
-The current repository is intentionally focused on the formulation rather than a full SE-Sync or CORA solver.
+The current repository is intentionally focused on formulation and numerical validation rather than implementing the full SE-Sync or CORA solver.
 
 ## Current Scope
 
@@ -10,17 +10,18 @@ The current implementation uses a small 2D pose graph with relative rotation and
 
 For an edge `(i, j)`, the reference pose-graph objective is
 
-$$
-F(R,t) =
+```math
+F(R,t)
+=
 \sum_{(i,j)}
 \kappa_{ij}
 \left\|R_j - R_i \tilde{R}_{ij}\right\|_F^2
 +
 \tau_{ij}
-\left\|t_j - t_i - R_i \tilde{t}_{ij}\right\|_2^2.
-$$
+\left\|t_j - t_i - R_i \tilde{t}_{ij}\right\|_2^2
+```
 
-The same objective is then evaluated through multiple equivalent representations.
+The same objective is evaluated through multiple equivalent representations.
 
 ---
 
@@ -30,19 +31,19 @@ The relative pose residuals are implemented directly in C++.
 
 Rotation residual:
 
-$$
+```math
 e^R_{ij}
 =
 R_j - R_i \tilde{R}_{ij}
-$$
+```
 
 Translation residual:
 
-$$
+```math
 e^t_{ij}
 =
 t_j - t_i - R_i \tilde{t}_{ij}
-$$
+```
 
 A small three-pose graph is used as a controlled numerical reference.
 
@@ -56,15 +57,19 @@ The direct residuals are rewritten using the SE-Sync-style matrices `B1`, `B2`, 
 
 For the translation residuals,
 
-$$
-e_t = B_1 t + B_2 r
-$$
+```math
+e_t
+=
+B_1 t + B_2 r
+```
 
 and for the rotation residuals,
 
-$$
-e_R = B_3 r,
-$$
+```math
+e_R
+=
+B_3 r
+```
 
 where `r` contains the vectorized rotation blocks.
 
@@ -72,35 +77,35 @@ The implementation verifies that the matrix residuals match the direct residuals
 
 The explicit state is arranged as
 
-$$
-Y =
+```math
+Y
+=
 \left[
 t_0 \; t_1 \; \cdots \; t_{n-1}
 \mid
 R_0 \; R_1 \; \cdots \; R_{n-1}
-\right].
-$$
+\right]
+```
 
 The explicit quadratic data matrix `M` is constructed such that
 
-$$
+```math
 F(Y)
 =
-\operatorname{tr}
-\left(
-Y M Y^\top
-\right).
-$$
+\mathrm{tr}\left(Y M Y^\top\right)
+```
 
 The current implementation verifies
 
-$$
-F_{\text{direct}}
+```math
+F_{\mathrm{direct}}
 =
 F_{B_1,B_2,B_3}
 =
-F_M.
-$$
+F_M
+```
+
+No relaxation is introduced at this stage. These are equivalent representations of the same PGO objective.
 
 ---
 
@@ -108,28 +113,29 @@ $$
 
 For fixed rotations, translations form a linear least-squares subproblem:
 
-$$
+```math
 t^\star(R)
 =
-\arg\min_t F(R,t).
-$$
+\arg\min_{t} F(R,t)
+```
 
-Because the objective only depends on relative translations, global translation is unobservable. A translation gauge is therefore removed before solving the reduced system.
+The objective depends only on relative translations, so global translation is unobservable. A translation gauge is therefore removed before solving the reduced system.
 
 Using the reduced weighted incidence matrix `B`, the projection is
 
-$$
+```math
 \Pi
 =
-I -
+I
+-
 B^\top
 (BB^\top)^{-1}
-B.
-$$
+B
+```
 
 The reduced rotation-only matrix is then
 
-$$
+```math
 Q
 =
 L(G^\rho)
@@ -138,29 +144,30 @@ T^\top
 \Omega^{1/2}
 \Pi
 \Omega^{1/2}
-T.
-$$
+T
+```
 
-The simplified objective becomes
+The first term contains the rotational measurement contribution.
 
-$$
-F_{\text{simplified}}(R)
+The second term keeps the effect of the translation measurements after the translation variables have been eliminated.
+
+The simplified objective is
+
+```math
+F_{\mathrm{simplified}}(R)
 =
-\operatorname{tr}
-\left(
-R Q R^\top
-\right).
-$$
+\mathrm{tr}\left(R Q R^\top\right)
+```
 
 The implementation verifies
 
-$$
+```math
 F(R,t^\star(R))
 =
-F_{\text{simplified}}(R).
-$$
+F_{\mathrm{simplified}}(R)
+```
 
-This means the simplified formulation eliminates the translation variables, but does **not** discard translation measurement information. Their optimal contribution remains encoded in `Q`.
+Therefore the simplified formulation removes the translation variables, but does not discard translation measurement information. Their optimal contribution remains encoded in `Q`.
 
 ---
 
@@ -175,12 +182,13 @@ Simplified Q cost:                0.232564837850
 Explicit vs simplified diff:      0.000000000000
 ```
 
-The implementation also checks:
+The current implementation also checks
 
 ```text
 Direct translation residual == B1 * t + B2 * r
 Direct rotation residual    == B3 * r
 
+Direct PGO cost == B1/B2/B3 cost
 Direct PGO cost == explicit M cost
 
 Q  == Q^T
@@ -227,18 +235,21 @@ All current regression tests pass.
     └── test_simplified_equivalence.cpp
 ```
 
-### Main implementation files
+### Main Implementation Files
 
-- `src/pgo_cost.cpp`  
-  Direct weighted pose-graph objective.
+`src/pgo_cost.cpp`
 
-- `src/sesync_matrices.cpp`  
-  Construction of `B1`, `B2`, `B3`, and the explicit data matrix `M`.
+Direct implementation of the weighted pose-graph residuals and objective.
 
-- `src/simplified_pgo.cpp`  
-  Translation elimination, projection `Pi`, and construction of the reduced matrix `Q`.
+`src/sesync_matrices.cpp`
 
-The programs in `apps/` are small numerical experiments used to validate the equivalence between these formulations.
+Construction of `B1`, `B2`, `B3`, and the explicit quadratic data matrix `M`.
+
+`src/simplified_pgo.cpp`
+
+Construction of the graph matrices, translation elimination, projection `Pi`, and reduced rotation-only matrix `Q`.
+
+The programs under `apps/` are small numerical experiments used to validate equivalence between the different formulations.
 
 ---
 
@@ -255,7 +266,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j"$(nproc)"
 ```
 
-Run the experiments:
+Run the formulation experiments:
 
 ```bash
 ./build/reference_pgo
@@ -273,7 +284,7 @@ ctest --test-dir build --output-on-failure
 
 ## Current Progress
 
-The formulation path currently validated is
+The formulation path currently implemented and numerically validated is
 
 ```text
 Direct PGO residuals
@@ -291,15 +302,13 @@ Translation elimination
 Simplified matrix Q
 ```
 
-No SDP, Burer-Monteiro, Riemannian Staircase, or CORA range factor has been implemented yet.
+The current work does not yet implement the SDP relaxation, Burer-Monteiro formulation, Riemannian Staircase, certification, or CORA range residuals.
 
 ---
 
 ## Next Step
 
-The next step is to reproduce the validated pose-graph residual using SymForce as a symbolic and code-generation layer.
-
-The intended workflow is
+The next step is to reproduce the validated PGO residual using SymForce as a symbolic and code-generation layer.
 
 ```text
 Validated handwritten C++ residual
@@ -314,7 +323,7 @@ Validated handwritten C++ residual
  Numerical equivalence checks
               |
               v
- Jacobian / runtime experiments
+ Jacobian and runtime experiments
 ```
 
-CORA range residuals and the later certifiable optimization layers will be introduced only after the base pose-graph formulation remains numerically consistent.
+The generated SymForce implementation will first be checked against the current handwritten C++ reference before moving to later optimization layers or CORA range measurements.
