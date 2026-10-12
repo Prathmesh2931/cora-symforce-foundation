@@ -97,7 +97,7 @@ F_{ij}
 
 A small three-pose graph is used as a controlled numerical reference.
 
-At the state used to generate the measurements, both residuals are zero. Perturbed states are then used for the equivalence tests so that the compared costs are non-zero.
+At the state used to generate the measurements, both residuals are zero. Perturbed states are then used for equivalence tests so that the compared costs are non-zero.
 
 ---
 
@@ -143,7 +143,7 @@ R_i \tilde{t}_{ij}
 B_3 r
 =
 \sqrt{\kappa_{ij}}
-\operatorname{vec}
+\mathrm{vec}
 \left(
 R_j - R_i \tilde{R}_{ij}
 \right)
@@ -180,7 +180,7 @@ F(Y)
 =
 \mathrm{tr}
 \left(
-YMY^\top
+Y M Y^\top
 \right)
 ```
 
@@ -223,7 +223,8 @@ For fixed rotations, translations form a linear least-squares subproblem:
 ```math
 t^\star(R)
 =
-\arg\min_t F(R,t)
+\mathrm{arg\,min}_{t}
+F(R,t)
 ```
 
 The objective depends only on relative translations, so global translation is unobservable.
@@ -235,7 +236,7 @@ Let `A` be the oriented incidence matrix and
 ```math
 \Omega
 =
-\operatorname{diag}
+\mathrm{diag}
 (\tau_1,\ldots,\tau_m)
 ```
 
@@ -289,7 +290,7 @@ F_{\mathrm{simplified}}(R)
 =
 \mathrm{tr}
 \left(
-RQR^\top
+R Q R^\top
 \right)
 ```
 
@@ -347,7 +348,7 @@ R(\theta)
 The rotation residual is vectorized column-major:
 
 ```math
-\operatorname{vec}(r^R_{ij})
+\mathrm{vec}(r^R_{ij})
 =
 \begin{bmatrix}
 r^R_{00} \\
@@ -364,7 +365,7 @@ r_{ij}
 =
 \begin{bmatrix}
 \sqrt{\kappa_{ij}}
-\operatorname{vec}
+\mathrm{vec}
 \left(
 R_j - R_i\tilde{R}_{ij}
 \right)
@@ -533,7 +534,7 @@ For the current SO(2) implementation, the wrapper recovers the angle associated 
 ```math
 \theta
 =
-\operatorname{atan2}
+\mathrm{atan2}
 (R_{10},R_{00})
 ```
 
