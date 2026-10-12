@@ -126,3 +126,5 @@ if(BUILD_TESTING)
         COMMAND test_simplified_equivalence
     )
 endif()
+
+include(cmake/SymForceStage.cmake)
