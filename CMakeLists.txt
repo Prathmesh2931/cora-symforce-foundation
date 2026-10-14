@@ -18,6 +18,7 @@ add_library(
     src/sesync_matrices.cpp
     src/simplified_pgo.cpp
     src/toy_problem.cpp
+    src/g2o_dataset.cpp
 )
 
 target_include_directories(
