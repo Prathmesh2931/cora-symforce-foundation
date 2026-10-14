@@ -19,6 +19,7 @@ add_library(
     src/simplified_pgo.cpp
     src/toy_problem.cpp
     src/g2o_dataset.cpp
+    src/trajectory_io.cpp
 )
 
 target_include_directories(
@@ -63,6 +64,18 @@ target_link_libraries(
         cora_symforce
 )
 
+
+add_executable(
+    export_trajectory
+    apps/export_trajectory.cpp
+)
+
+target_link_libraries(
+    export_trajectory
+    PRIVATE
+        cora_symforce
+)
+
 include(CTest)
 
 if(BUILD_TESTING)
@@ -96,6 +109,22 @@ if(BUILD_TESTING)
     add_test(
         NAME matrix_equivalence_tests
         COMMAND test_matrix_equivalence
+    )
+
+    add_executable(
+        test_trajectory_io
+        tests/test_trajectory_io.cpp
+    )
+
+    target_link_libraries(
+        test_trajectory_io
+        PRIVATE
+            cora_symforce
+    )
+
+    add_test(
+        NAME trajectory_io
+        COMMAND test_trajectory_io
     )
 endif()
 
