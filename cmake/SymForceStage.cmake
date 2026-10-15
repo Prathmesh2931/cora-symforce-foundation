@@ -27,6 +27,7 @@ if(
             src/symforce_pgo_cost.cpp
             src/graph_linearization.cpp
             src/gauss_newton.cpp
+            src/symmetric_solver.cpp
     )
 
     target_include_directories(
@@ -144,6 +145,35 @@ if(
     )
 
 
+    # Controlled fixed-linearization comparison between SparseQR and the
+    # symmetric normal-equation path.
+    add_executable(
+        test_symmetric_solver
+        tests/test_symmetric_solver.cpp
+    )
+
+    target_link_libraries(
+        test_symmetric_solver
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
+
+    # Dataset benchmark for SparseQR versus SimplicialLDLT on the same J.
+    add_executable(
+        benchmark_linear_solvers
+        apps/benchmark_linear_solvers.cpp
+    )
+
+    target_link_libraries(
+        benchmark_linear_solvers
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
+
     # Graph-level reference-vs-SymForce PGO test.
     add_executable(
         test_symforce_pgo_cost
@@ -188,6 +218,11 @@ if(
         add_test(
             NAME gauss_newton
             COMMAND test_gauss_newton
+        )
+
+        add_test(
+            NAME symmetric_solver
+            COMMAND test_symmetric_solver
         )
 
     endif()
