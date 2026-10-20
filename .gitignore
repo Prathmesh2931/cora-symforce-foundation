@@ -5,3 +5,18 @@ __pycache__/
 .pytest_cache/
 .vscode/
 .idea/
+
+# Local datasets and generated experiment outputs
+data/
+results/
+
+# Research scratch/context files
+solver_context.txt
+symmetric_solver_context.txt
+
+# Standalone external-reference builds
+tools/gtsam_reference/build/
+
+# Python cache
+__pycache__/
+*.pyc
