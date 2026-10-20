@@ -96,9 +96,9 @@ Only the linear solver changes.
 
 The reference backend solves:
 
-$$
+```math
 J \Delta x \approx -r
-$$
+```
 
 using Eigen `SparseQR`.
 
@@ -106,21 +106,21 @@ using Eigen `SparseQR`.
 
 The second backend solves the gauge-reduced normal equations:
 
-$$
+```math
 H_r \Delta x_r = -g_r
-$$
+```
 
 with
 
-$$
+```math
 H_r = J_r^T J_r
-$$
+```
 
 and
 
-$$
+```math
 g_r = J_r^T r
-$$
+```
 
 using Eigen `SimplicialLDLT`.
 
@@ -267,7 +267,7 @@ For an edge between poses $i$ and $j$, let
 
 The SE-Sync objective implemented in this repository is:
 
-$$
+```math
 F(R,t)
 =
 \sum_{(i,j)}
@@ -280,7 +280,7 @@ R_j - R_i \widetilde{R}_{ij}
 \left\|
 t_j - t_i - R_i \widetilde{t}_{ij}
 \right\|_2^2
-$$
+```
 
 ---
 
@@ -288,27 +288,27 @@ $$
 
 For an `EDGE_SE2` measurement, define the translational information block:
 
-$$
+```math
 \Omega_{t,ij}
 =
 \begin{bmatrix}
 I_{11} & I_{12} \\
 I_{12} & I_{22}
 \end{bmatrix}
-$$
+```
 
 The isotropic SE-Sync translation precision is:
 
-$$
+```math
 \tau_{ij}
 =
 \frac{2}
 {\mathrm{tr}\left(\Omega_{t,ij}^{-1}\right)}
-$$
+```
 
 For the symmetric two-dimensional block, this is equivalent to:
 
-$$
+```math
 \tau_{ij}
 =
 \frac{
@@ -316,13 +316,13 @@ $$
 }{
 \mathrm{tr}(\Omega_{t,ij})
 }
-$$
+```
 
 The rotational precision is:
 
-$$
+```math
 \kappa_{ij}=I_{33}
-$$
+```
 
 Translation/rotation cross-information entries are intentionally not included
 because this implementation follows the SE-Sync isotropic precision model.
@@ -335,23 +335,23 @@ because this implementation follows the SE-Sync isotropic precision model.
 
 The rotational residual is:
 
-$$
+```math
 e^R_{ij}
 =
 R_j - R_i \widetilde{R}_{ij}
-$$
+```
 
 The translational residual is:
 
-$$
+```math
 e^t_{ij}
 =
 t_j - t_i - R_i \widetilde{t}_{ij}
-$$
+```
 
 The weighted edge cost is:
 
-$$
+```math
 F_{ij}
 =
 \kappa_{ij}
@@ -359,7 +359,7 @@ F_{ij}
 +
 \tau_{ij}
 \left\|e^t_{ij}\right\|_2^2
-$$
+```
 
 The handwritten implementation in:
 
@@ -377,21 +377,21 @@ The same objective can be represented using linear residual operators.
 
 The stacked translation residual is:
 
-$$
+```math
 e_t = B_1 t + B_2 r
-$$
+```
 
 and the stacked rotational residual is:
 
-$$
+```math
 e_R = B_3 r
-$$
+```
 
 where $r$ contains the column-major vectorization of all rotation matrices.
 
 The complete objective becomes:
 
-$$
+```math
 F
 =
 \left\|
@@ -401,27 +401,27 @@ B_1 t + B_2 r
 \left\|
 B_3 r
 \right\|_2^2
-$$
+```
 
 At the edge level:
 
-$$
+```math
 B_1 t
 =
 \sqrt{\tau_{ij}}
 (t_j-t_i)
-$$
+```
 
-$$
+```math
 B_2 r
 =
 -\sqrt{\tau_{ij}}
 R_i \widetilde{t}_{ij}
-$$
+```
 
 and:
 
-$$
+```math
 B_3 r
 =
 \sqrt{\kappa_{ij}}
@@ -429,11 +429,11 @@ B_3 r
 \left(
 R_j-R_i\widetilde{R}_{ij}
 \right)
-$$
+```
 
 The matrix vectorization convention is column-major:
 
-$$
+```math
 \mathrm{vec}(R)
 =
 \begin{bmatrix}
@@ -442,7 +442,7 @@ R_{10} \\
 R_{01} \\
 R_{11}
 \end{bmatrix}
-$$
+```
 
 The implementation verifies numerically that the direct and operator
 representations produce the same residuals and objective.
@@ -453,25 +453,25 @@ representations produce the same residuals and objective.
 
 The same PGO objective can be written as:
 
-$$
+```math
 F(Y)
 =
 \mathrm{tr}
 \left(
 Y M Y^T
 \right)
-$$
+```
 
 where the quadratic data matrix has the block structure:
 
-$$
+```math
 M
 =
 \begin{bmatrix}
 L_{\tau} & V \\
 V^T & L_{\rho}+\Sigma
 \end{bmatrix}
-$$
+```
 
 where:
 
@@ -491,13 +491,13 @@ No relaxation has been introduced at this stage.
 
 For fixed rotations, translation estimation is a linear least-squares problem:
 
-$$
+```math
 t^*(R)
 =
 \underset{t}{\arg\min}
 \;
 F(R,t)
-$$
+```
 
 Global translation is unobservable because the objective depends only on
 relative translations.
@@ -506,27 +506,27 @@ One translation gauge is therefore removed before solving the system.
 
 Let $A$ be the oriented graph incidence matrix and define:
 
-$$
+```math
 \Omega
 =
 \mathrm{diag}
 \left(
 \tau_1,\ldots,\tau_m
 \right)
-$$
+```
 
 After removing one redundant row of the incidence matrix:
 
-$$
+```math
 B
 =
 A_{\mathrm{red}}
 \Omega^{1/2}
-$$
+```
 
 The projection matrix is:
 
-$$
+```math
 \Pi
 =
 I
@@ -534,14 +534,14 @@ I
 B^T
 (BB^T)^{-1}
 B
-$$
+```
 
 The inverse in this expression is **not explicitly formed** in the
 implementation. The corresponding linear system is solved numerically.
 
 The reduced rotation-only matrix is:
 
-$$
+```math
 Q
 =
 L_{\rho}
@@ -551,26 +551,26 @@ T^T
 \Pi
 \Omega^{1/2}
 T
-$$
+```
 
 and the reduced objective becomes:
 
-$$
+```math
 F_{\mathrm{red}}(R)
 =
 \mathrm{tr}
 \left(
 R Q R^T
 \right)
-$$
+```
 
 The implementation verifies:
 
-$$
+```math
 F(R,t^*(R))
 =
 F_{\mathrm{red}}(R)
-$$
+```
 
 to numerical precision.
 
@@ -585,40 +585,40 @@ The same SE-Sync edge residual is implemented symbolically with SymForce.
 
 For one edge:
 
-$$
+```math
 r^R_{ij}
 =
 \sqrt{\kappa_{ij}}
 \left(
 R_j-R_i\widetilde{R}_{ij}
 \right)
-$$
+```
 
 and:
 
-$$
+```math
 r^t_{ij}
 =
 \sqrt{\tau_{ij}}
 \left(
 t_j-t_i-R_i\widetilde{t}_{ij}
 \right)
-$$
+```
 
 For two-dimensional rotations:
 
-$$
+```math
 R(\theta)
 =
 \begin{bmatrix}
 \cos\theta & -\sin\theta \\
 \sin\theta & \cos\theta
 \end{bmatrix}
-$$
+```
 
 The complete generated edge residual is:
 
-$$
+```math
 r_{ij}
 =
 \begin{bmatrix}
@@ -633,17 +633,17 @@ R_j-R_i\widetilde{R}_{ij}
 t_j-t_i-R_i\widetilde{t}_{ij}
 \right)
 \end{bmatrix}
-$$
+```
 
 with:
 
-$$
+```math
 r_{ij}\in\mathbb{R}^6
-$$
+```
 
 The local edge state is:
 
-$$
+```math
 x_{ij}
 =
 \begin{bmatrix}
@@ -654,22 +654,22 @@ t_{iy} &
 t_{jx} &
 t_{jy}
 \end{bmatrix}^T
-$$
+```
 
 and the local Jacobian is:
 
-$$
+```math
 J_{ij}
 =
 \frac{\partial r_{ij}}
 {\partial x_{ij}}
-$$
+```
 
 with:
 
-$$
+```math
 J_{ij}\in\mathbb{R}^{6\times6}
-$$
+```
 
 The SymForce implementation intentionally reproduces the SE-Sync
 matrix-difference rotational residual rather than replacing it with a
@@ -682,62 +682,62 @@ different Lie-group pose residual.
 For a graph with $n$ poses and $m$ measurements, the local Jacobians are
 scattered into:
 
-$$
+```math
 J_c
 \in
 \mathbb{R}^{6m\times n}
-$$
+```
 
 for angular variables, and:
 
-$$
+```math
 J_f
 \in
 \mathbb{R}^{6m\times2n}
-$$
+```
 
 for translation variables.
 
 The complete Jacobian is:
 
-$$
+```math
 J
 =
 \begin{bmatrix}
 J_c & J_f
 \end{bmatrix}
-$$
+```
 
 and:
 
-$$
+```math
 H
 =
 J^T J
-$$
+```
 
 with block structure:
 
-$$
+```math
 H
 =
 \begin{bmatrix}
 H_{cc} & H_{cf} \\
 H_{fc} & H_{ff}
 \end{bmatrix}
-$$
+```
 
 The implementation also verifies the exact global-translation nullspace:
 
-$$
+```math
 J_f v_x = 0
-$$
+```
 
 and:
 
-$$
+```math
 J_f v_y = 0
-$$
+```
 
 ---
 
@@ -745,58 +745,58 @@ $$
 
 At nonlinear iteration $k$:
 
-$$
+```math
 r(x_k+\Delta x)
 \approx
 r_k+J_k\Delta x
-$$
+```
 
 The local least-squares problem is:
 
-$$
+```math
 \min_{\Delta x}
 \left\|
 r_k+J_k\Delta x
 \right\|_2^2
-$$
+```
 
 Define:
 
-$$
+```math
 g=J^T r
-$$
+```
 
 and:
 
-$$
+```math
 H=J^T J
-$$
+```
 
 The symmetric Gauss-Newton step then satisfies:
 
-$$
+```math
 H\Delta x=-g
-$$
+```
 
 Because the objective is:
 
-$$
+```math
 F=r^T r
-$$
+```
 
 its gradient is:
 
-$$
+```math
 \nabla F=2J^T r
-$$
+```
 
 and the Gauss-Newton Hessian approximation is:
 
-$$
+```math
 H_{\mathrm{GN}}
 \approx
 2J^T J
-$$
+```
 
 The factor of two cancels from the linear solve.
 
@@ -1064,18 +1064,18 @@ poor / arbitrary / unavailable pose initialization
 
 The local normal matrix can be partitioned as:
 
-$$
+```math
 H
 =
 \begin{bmatrix}
 H_{cc} & H_{cf} \\
 H_{fc} & H_{ff}
 \end{bmatrix}
-$$
+```
 
 After appropriate translation-gauge handling, the local Schur complement is:
 
-$$
+```math
 S
 =
 H_{cc}
@@ -1083,14 +1083,14 @@ H_{cc}
 H_{cf}
 H_{ff}^{-1}
 H_{fc}
-$$
+```
 
 The inverse will not be formed explicitly. Instead, the translation block
 will be factorized and applied through sparse linear solves.
 
 The first validation target will be:
 
-$$
+```math
 \left\|
 J
 \left(
@@ -1100,7 +1100,7 @@ J
 \right)
 \right\|
 \approx 0
-$$
+```
 
 The local Gauss-Newton Schur complement should not be confused with the exact
 SE-Sync reduced matrix $Q$.
