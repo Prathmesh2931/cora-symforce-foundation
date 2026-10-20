@@ -1,271 +1,271 @@
 # CORA / SE-Sync SymForce Foundation
 
-A small C++ reference implementation for understanding, reproducing, and numerically validating the pose-graph optimization formulations used in SE-Sync, together with a SymForce symbolic code-generation layer.
+A C++ research implementation for reproducing and validating the SE-Sync pose-graph objective, generating exact residual/Jacobian kernels with SymForce, assembling sparse graph linearizations, and studying numerical optimization backends under controlled validation.
 
-The longer-term goal is to use this validated foundation to study structured variable elimination, sparse Schur-complement methods, SPARSER-style matrix-free computation, and eventually broader CORA formulations.
-
-The repository is intentionally focused on formulation, symbolic generation, and numerical equivalence rather than implementing the complete SE-Sync or CORA solver.
+The current repository is focused on **SE(2) pose-graph optimization**. It does **not** yet include CORA range variables or a complete certifiable CORA solver. The purpose of this repository is to isolate and validate each mathematical and numerical layer before moving toward structured elimination, initialization-robust optimization, and certifiable/global formulations.
 
 ---
 
-## Current Scope
+## 1. Research Question
 
-The current implementation uses a small 2D pose graph with relative rotation and translation measurements.
+The project started from a simple implementation question:
 
-For an edge `(i, j)`, the pose-graph objective is
+> Can the SE-Sync pose-graph objective be reproduced exactly, differentiated symbolically, assembled sparsely, and solved efficiently in C++ without changing the underlying mathematics?
+
+That question has now been validated through several layers:
+
+```text
+SE-Sync objective
+      |
+      v
+Handwritten residuals
+      |
+      v
+B1 / B2 / B3 operators
+      |
+      v
+Explicit quadratic matrix M
+      |
+      v
+Exact translation elimination
+      |
+      v
+Reduced rotation-only Q
+      |
+      v
+SymForce symbolic residual / Jacobian
+      |
+      v
+Generated C++ kernels
+      |
+      v
+Sparse graph linearization
+      |
+      v
+Gauss-Newton
+      |
+      +--> SparseQR reference backend
+      |
+      +--> gauge-reduced normal equations + SimplicialLDLT
+      |
+      v
+Real MIT / CSAIL validation
+      |
+      v
+External GTSAM + official SE-Sync cross-validation
+```
+
+The latest experiments exposed a second, more important question:
+
+> How should a solver recover the correct solution when the supplied pose initialization lies in a poor nonlinear basin?
+
+On the MIT SE(2) graph, the current local Gauss-Newton implementation converges reliably to a local solution near `1298.03` from the supplied vertices, while the official SE-Sync implementation certifies the global optimum near `61.1541`.
+
+This distinction now separates two research threads:
+
+1. **efficient local optimization**: sparse factorization, Schur/VarPro, matrix-free operators;
+2. **initialization-robust / certifiable optimization**: chordal baselines, LM/trust-region alternatives, and reduced-\(Q\) global-relaxation approaches.
+
+---
+
+## 2. Pose-Graph Objective
+
+For an edge \((i,j)\),
 
 ```math
 F(R,t)
 =
 \sum_{(i,j)}
 \kappa_{ij}
-\left\|R_j - R_i \tilde{R}_{ij}\right\|_F^2
+\left\|
+R_j-R_i\tilde R_{ij}
+\right\|_F^2
 +
 \tau_{ij}
-\left\|t_j - t_i - R_i \tilde{t}_{ij}\right\|_2^2
+\left\|
+t_j-t_i-R_i\tilde t_{ij}
+\right\|_2^2 .
 ```
 
-where
+where:
 
-- `R_i`, `R_j` are absolute rotations,
-- `t_i`, `t_j` are absolute translations,
-- `\tilde{R}_{ij}` is the measured relative rotation,
-- `\tilde{t}_{ij}` is the measured relative translation expressed in frame `i`,
-- `\kappa_{ij}` is the rotational precision,
-- `\tau_{ij}` is the translational precision.
+- \(R_i,R_j\in SO(2)\) are absolute rotations,
+- \(t_i,t_j\in\mathbb{R}^2\) are absolute translations,
+- \(\tilde R_{ij},\tilde t_{ij}\) are relative-pose measurements,
+- \(\kappa_{ij}\) is rotational precision,
+- \(\tau_{ij}\) is translational precision.
 
-The same objective is currently evaluated through several equivalent representations:
+For `EDGE_SE2` information entries
 
 ```text
-Direct residuals
-        |
-        v
-B1 / B2 / B3 residual operators
-        |
-        v
-Explicit quadratic matrix M
-        |
-        v
-Analytical translation elimination
-        |
-        v
-Reduced rotation-only Q
-        |
-        v
-SymForce symbolic residual
-        |
-        v
-Generated C++ residual / Jacobian
-        |
-        v
-Edge-level and graph-level equivalence tests
+I11 I12 I13 I22 I23 I33
 ```
+
+the loader follows the SE-Sync isotropic precision model:
+
+```math
+\tau
+=
+\frac{2}
+{\operatorname{tr}
+\left(
+\operatorname{TranInfo}^{-1}
+\right)},
+\qquad
+\operatorname{TranInfo}
+=
+\begin{bmatrix}
+I_{11} & I_{12}\\
+I_{12} & I_{22}
+\end{bmatrix},
+```
+
+and
+
+```math
+\kappa = I_{33}.
+```
+
+The translation/rotation cross-information entries are not used by this SE-Sync objective.
 
 ---
 
-## 1. Direct PGO Formulation
+## 3. Equivalent SE-Sync Formulations
 
-The relative pose residuals are implemented directly in C++.
-
-Rotation residual:
+### 3.1 Direct residuals
 
 ```math
 e^R_{ij}
 =
-R_j - R_i \tilde{R}_{ij}
+R_j-R_i\tilde R_{ij},
 ```
-
-Translation residual:
 
 ```math
 e^t_{ij}
 =
-t_j - t_i - R_i \tilde{t}_{ij}
+t_j-t_i-R_i\tilde t_{ij}.
 ```
 
-The weighted edge cost is
+The edge cost is
 
 ```math
 F_{ij}
 =
-\kappa_{ij}
-\left\|e^R_{ij}\right\|_F^2
+\kappa_{ij}\|e^R_{ij}\|_F^2
 +
-\tau_{ij}
-\left\|e^t_{ij}\right\|_2^2
+\tau_{ij}\|e^t_{ij}\|_2^2.
 ```
 
-A small three-pose graph is used as a controlled numerical reference.
+The handwritten implementation in `src/pgo_cost.cpp` remains an independent numerical reference.
 
-At the state used to generate the measurements, both residuals are zero. Perturbed states are then used for equivalence tests so that the compared costs are non-zero.
+### 3.2 \(B_1/B_2/B_3\) residual operators
 
----
-
-## 2. SE-Sync Matrix Formulation
-
-The direct residuals are rewritten using SE-Sync-style residual operators `B1`, `B2`, and `B3`.
-
-For the translation residuals,
+The same objective is rewritten as
 
 ```math
-e_t
-=
-B_1 t + B_2 r
+e_t=B_1t+B_2r,
+\qquad
+e_R=B_3r,
 ```
 
-and for the rotation residuals,
-
-```math
-e_R
-=
-B_3 r
-```
-
-where `r` contains the column-major vectorization of the rotation blocks.
-
-The operators represent
-
-```math
-B_1 t
-=
-\sqrt{\tau_{ij}}
-(t_j - t_i)
-```
-
-```math
-B_2 r
-=
--\sqrt{\tau_{ij}}
-R_i \tilde{t}_{ij}
-```
-
-```math
-B_3 r
-=
-\sqrt{\kappa_{ij}}
-\mathrm{vec}
-\left(
-R_j - R_i \tilde{R}_{ij}
-\right)
-```
-
-Therefore,
+with
 
 ```math
 F
 =
-\left\|B_1t + B_2r\right\|_2^2
+\|B_1t+B_2r\|_2^2
 +
-\left\|B_3r\right\|_2^2
+\|B_3r\|_2^2.
 ```
 
-The implementation verifies numerically that the matrix residuals match the direct residuals.
-
-The explicit state is arranged as
+The operators encode
 
 ```math
-Y
+B_1t
 =
-\left[
-t_0 \; t_1 \; \cdots \; t_{n-1}
-\mid
-R_0 \; R_1 \; \cdots \; R_{n-1}
-\right]
+\sqrt{\tau_{ij}}(t_j-t_i),
 ```
 
-The explicit quadratic data matrix `M` is constructed such that
+```math
+B_2r
+=
+-\sqrt{\tau_{ij}}R_i\tilde t_{ij},
+```
+
+and
 
 ```math
-F(Y)
+B_3r
 =
-\mathrm{tr}
+\sqrt{\kappa_{ij}}
+\operatorname{vec}
 \left(
-Y M Y^\top
-\right)
+R_j-R_i\tilde R_{ij}
+\right).
+```
+
+### 3.3 Explicit quadratic data matrix
+
+With the state arranged as translations followed by rotation blocks,
+
+```math
+Y=
+\left[
+t_0\;t_1\;\cdots\;t_{n-1}
+\mid
+R_0\;R_1\;\cdots\;R_{n-1}
+\right],
+```
+
+the objective is represented exactly as
+
+```math
+F(Y)=\operatorname{tr}(YMY^\top),
 ```
 
 with block structure
 
 ```math
-M
-=
+M=
 \begin{bmatrix}
-L_\tau & V \\
-V^\top & L(G^\rho) + \Sigma
-\end{bmatrix}
+L_\tau & V\\
+V^\top & L(G^\rho)+\Sigma
+\end{bmatrix}.
 ```
 
-where
-
-- `L_\tau` is the translational graph Laplacian,
-- `V` contains translation-rotation coupling terms,
-- `\Sigma` contains the contribution from the squared translation-measurement term,
-- `L(G^\rho)` is the rotational connection Laplacian.
-
-The implementation verifies
-
-```math
-F_{\mathrm{direct}}
-=
-F_{B_1,B_2,B_3}
-=
-F_M
-```
-
-No relaxation is introduced at this stage. These are equivalent representations of the same PGO objective.
+No relaxation is introduced here. The direct residual, operator, and quadratic forms are numerically equivalent.
 
 ---
 
-## 3. Simplified SE-Sync Formulation
+## 4. Exact Translation Elimination
 
 For fixed rotations, translations form a linear least-squares subproblem:
 
 ```math
 t^\star(R)
 =
-\mathrm{arg\,min}_{t}
-F(R,t)
+\arg\min_t F(R,t).
 ```
 
-The objective depends only on relative translations, so global translation is unobservable.
+Because global translation is unobservable, one redundant translation degree of freedom is removed before factorization.
 
-A translation gauge is therefore removed before solving the reduced system.
-
-Let `A` be the oriented incidence matrix and
+Using the reduced weighted incidence matrix
 
 ```math
-\Omega
-=
-\mathrm{diag}
-(\tau_1,\ldots,\tau_m)
+B=A_{\mathrm{red}}\Omega^{1/2},
 ```
 
-be the translational precision matrix.
-
-After removing one redundant row of the incidence matrix,
-
-```math
-B
-=
-A_{\mathrm{red}}
-\Omega^{1/2}
-```
-
-The projection matrix is
+the projection operator is
 
 ```math
 \Pi
 =
-I
--
-B^\top
-(BB^\top)^{-1}
-B
+I-B^\top(BB^\top)^{-1}B.
 ```
 
-In the implementation, the inverse is not formed explicitly. The linear system involving `BB^T` is solved using a numerical factorization.
+The inverse is **not** formed explicitly in code; the corresponding linear system is solved numerically.
 
-The reduced rotation-only matrix is
+The exact reduced rotation-only matrix is
 
 ```math
 Q
@@ -276,483 +276,840 @@ T^\top
 \Omega^{1/2}
 \Pi
 \Omega^{1/2}
-T
+T,
 ```
 
-The first term contains the rotational measurement contribution.
-
-The second term retains the effect of the translation measurements after the translation variables have been eliminated.
-
-The simplified objective is
+giving
 
 ```math
-F_{\mathrm{simplified}}(R)
+F_{\mathrm{red}}(R)
 =
-\mathrm{tr}
-\left(
-R Q R^\top
-\right)
+\operatorname{tr}(RQR^\top).
 ```
 
-The implementation verifies
+The controlled three-pose validation gives:
 
-```math
-F(R,t^\star(R))
-=
-F_{\mathrm{simplified}}(R)
+```text
+Direct PGO cost                  0.449279443492
+Explicit cost at t*(R)           0.232564837850
+Reduced Q cost                   0.232564837850
+Explicit vs reduced difference   0
 ```
 
-Therefore, the simplified formulation eliminates the translation variables but does not discard translation measurement information. Their optimal contribution remains encoded in `Q`.
+The implementation also verifies:
+
+```text
+Q  == Q^T
+Pi == Pi^T
+Pi^2 == Pi
+```
+
+### Important distinction
+
+The exact SE-Sync matrix \(Q\) is **not** the same object as the Gauss-Newton normal matrix \(H=J^\top J\).
+
+- \(Q\): exact global rotation-only data matrix after analytical translation elimination;
+- \(H\): local tangent-space quadratic approximation around the current nonlinear estimate.
 
 ---
 
-## 4. SymForce Symbolic Residuals
+## 5. SymForce Residual and Generated Jacobian
 
-The validated handwritten SE-Sync residual is reproduced symbolically using SymForce.
-
-The purpose of this stage is not to introduce a different pose error or a different optimization objective.
-
-The exact same weighted SE-Sync residual is used.
-
-For one edge `(i,j)`:
-
-```math
-r^R_{ij}
-=
-\sqrt{\kappa_{ij}}
-\left(
-R_j - R_i\tilde{R}_{ij}
-\right)
-```
-
-```math
-r^t_{ij}
-=
-\sqrt{\tau_{ij}}
-\left(
-t_j - t_i - R_i\tilde{t}_{ij}
-\right)
-```
-
-For the current 2D implementation,
-
-```math
-R(\theta)
-=
-\begin{bmatrix}
-\cos\theta & -\sin\theta \\
-\sin\theta & \cos\theta
-\end{bmatrix}
-```
-
-The rotation residual is vectorized column-major:
-
-```math
-\mathrm{vec}(r^R_{ij})
-=
-\begin{bmatrix}
-r^R_{00} \\
-r^R_{10} \\
-r^R_{01} \\
-r^R_{11}
-\end{bmatrix}
-```
-
-The complete generated edge residual is therefore
+For one edge,
 
 ```math
 r_{ij}
 =
 \begin{bmatrix}
 \sqrt{\kappa_{ij}}
-\mathrm{vec}
+\operatorname{vec}
 \left(
-R_j - R_i\tilde{R}_{ij}
+R_j-R_i\tilde R_{ij}
 \right)
 \\
 \sqrt{\tau_{ij}}
 \left(
-t_j - t_i - R_i\tilde{t}_{ij}
+t_j-t_i-R_i\tilde t_{ij}
 \right)
 \end{bmatrix}
-\in
-\mathbb{R}^6
+\in\mathbb{R}^{6}.
 ```
 
-The edge state ordering used for symbolic differentiation is
+The local state ordering is
 
 ```math
 x_{ij}
 =
-\begin{bmatrix}
-\theta_i &
-t_{ix} &
-t_{iy} &
-\theta_j &
-t_{jx} &
+[
+\theta_i,\,
+t_{ix},\,
+t_{iy},\,
+\theta_j,\,
+t_{jx},\,
 t_{jy}
-\end{bmatrix}^{\top}
+]^\top .
 ```
 
-Therefore, the generated edge Jacobian has dimension
+Therefore
 
 ```math
 J_{ij}
 =
 \frac{\partial r_{ij}}
 {\partial x_{ij}}
-\in
-\mathbb{R}^{6\times6}
+\in\mathbb{R}^{6\times6}.
 ```
 
-The SymForce implementation intentionally uses the SE-Sync matrix-difference rotational residual.
+The residual itself is manually defined from the SE-Sync equations. SymForce is used for symbolic differentiation, simplification, common-subexpression elimination, and C++ code generation.
 
-It does **not** replace it with a generic Lie-group logarithmic or `local_coordinates` pose residual.
+The generated residual intentionally uses the SE-Sync matrix-difference rotational residual rather than a generic Lie-group `Log` / `local_coordinates` error.
+
+### Edge-level numerical validation
+
+```text
+Residual equivalence error        2.002685474353e-16
+Cost equivalence error            5.551115123126e-17
+Jacobian finite-difference error  1.654302250742e-10
+```
+
+Additional differential checks:
+
+```text
+2 J^T r  vs finite-difference cost gradient   4.787481522328e-11
+J v      vs finite-difference residual dir.   9.510081611097e-11
+```
+
+These checks independently verify both the generated residual and the derivative used by optimization.
 
 ---
 
-## 5. Symbolic Jacobian Structure
+## 6. Sparse Graph Linearization
 
-Define
+Each generated \(6\times6\) edge Jacobian only depends on the two connected poses.
+
+For \(n\) poses and \(m\) edges, the graph linearization scatters local derivatives into
 
 ```math
-J_2
+J_c\in\mathbb{R}^{6m\times n},
+\qquad
+J_f\in\mathbb{R}^{6m\times2n},
+```
+
+where:
+
+- \(J_c\): one rotation-angle column per pose;
+- \(J_f\): two translation columns per pose.
+
+The Gauss-Newton blocks are
+
+```math
+H_{cc}=J_c^\top J_c,
+```
+
+```math
+H_{cf}=J_c^\top J_f,
+```
+
+```math
+H_{ff}=J_f^\top J_f.
+```
+
+The implementation explicitly validates the two global translation null directions:
+
+```math
+J_fv_x=0,
+\qquad
+J_fv_y=0.
+```
+
+### MIT graph structure
+
+```text
+poses                            808
+edges                            827
+Jc shape                         4962 x 808
+Jf shape                         4962 x 1616
+nnz(Jc)                          8262
+nnz(Jf)                          3308
+nnz(Hcc)                         2462
+nnz(Hcf)                         3260
+nnz(Hff)                         4924
+||Jf vx||                        0
+||Jf vy||                        0
+```
+
+---
+
+## 7. Gauss-Newton Optimizer
+
+At the current estimate \(x_k\),
+
+```math
+r(x_k+\Delta x)
+\approx
+r_k+J_k\Delta x.
+```
+
+The local problem is
+
+```math
+\min_{\Delta x}
+\|r_k+J_k\Delta x\|_2^2.
+```
+
+For
+
+```math
+F=r^\top r,
+```
+
+the gradient is
+
+```math
+\nabla F=2J^\top r.
+```
+
+The implementation uses backtracking line search and records per-iteration:
+
+- objective cost,
+- gradient norm,
+- step norm,
+- accepted step length,
+- sparse linearization time,
+- linear-solve time.
+
+---
+
+## 8. Linear Solver Backends
+
+### 8.1 SparseQR reference
+
+The reference backend solves the rectangular least-squares system directly:
+
+```math
+J\Delta x\approx-r.
+```
+
+Eigen `SparseQR` is useful as a rank-revealing numerical reference.
+
+For the MIT graph:
+
+```text
+state columns      2424
+SparseQR rank      2422
+rank deficiency    2
+```
+
+For CSAIL:
+
+```text
+state columns      3135
+SparseQR rank      3133
+rank deficiency    2
+```
+
+The observed deficiency matches the two exact global translation gauge directions.
+
+### 8.2 Gauge-reduced symmetric normal equations
+
+After fixing the first pose's translation increments,
+
+```math
+\Delta t_{0x}=0,
+\qquad
+\Delta t_{0y}=0,
+```
+
+the reduced system is
+
+```math
+H=J_r^\top J_r,
+\qquad
+g=J_r^\top r,
+```
+
+```math
+H\Delta x_r=-g.
+```
+
+The current implementation solves this symmetric sparse system using Eigen `SimplicialLDLT`.
+
+This backend is validated against SparseQR on the **same frozen residual and Jacobian**, rather than by comparing unrelated solver runs.
+
+### Frozen-linearization validation
+
+MIT:
+
+```text
+J shape                          4962 x 2424
+nnz(J)                           11570
+SparseQR rank                    2422
+Reduced H shape                  2422 x 2422
+nnz(H)                           13896
+H symmetry max error             0
+SparseQR total                   2175.43 ms
+Symmetric path total             0.824 ms
+QR / symmetric ratio             2641x
+||J(dx_QR - dx_LDLT)||           1.14e-11
+relative ||H dx + g||            2.46e-15
+```
+
+CSAIL:
+
+```text
+J shape                          7032 x 3135
+nnz(J)                           16408
+SparseQR rank                    3133
+Reduced H shape                  3133 x 3133
+nnz(H)                           19011
+H symmetry max error             0
+SparseQR total                   4604.54 ms
+Symmetric path total             1.247 ms
+QR / symmetric ratio             3693x
+||J(dx_QR - dx_LDLT)||           5.17e-13
+relative ||H dx + g||            1.03e-15
+```
+
+These results show that both methods produce effectively the same **local residual-space correction** on the tested linearizations.
+
+### Numerical caveat
+
+Normal equations trade speed for conditioning:
+
+```math
+\kappa(J^\top J)\approx\kappa(J)^2.
+```
+
+The LDLT path is therefore treated as a measured backend result, not as a universally superior replacement for QR.
+
+---
+
+## 9. Full Nonlinear QR vs LDLT
+
+Both backends use the same:
+
+- objective,
+- generated Jacobians,
+- initialization,
+- line search,
+- stopping rules,
+- nonlinear update convention.
+
+Only the linear algebra backend changes.
+
+### CSAIL
+
+Three-run median:
+
+```text
+Initial cost                      496.89616014905
+Final cost                        31.703715883625
+Iterations                        4
+
+SparseQR solve total              18632.565 ms
+LDLT solve total                  5.381 ms
+
+SparseQR wall time                18635.963 ms
+LDLT wall time                    8.605 ms
+
+Relative final-cost gap           2.24e-15
+QR / LDLT solve-time ratio        3462.6x
+QR / LDLT wall-time ratio         2165.6x
+```
+
+### MIT
+
+A 30-iteration comparison produced the same nonlinear cost trajectory and final objective for both backends, while the linear solver dominated the QR runtime.
+
+A later diagnostic run increased the maximum iteration limit to 200. Both QR and LDLT stopped after **69 iterations** at
+
+```text
+QR final cost                     1298.03279183363
+LDLT final cost                   1298.03279183363
+
+QR solve total                    147450.190477 ms
+LDLT solve total                  61.898108 ms
+
+QR / LDLT solve-time ratio        ~2382x
+```
+
+This experiment established that the `~1298` MIT result was **not caused by the earlier 30-iteration cap**.
+
+### Scope of the timing claim
+
+These numbers compare two backends inside this implementation:
+
+```text
+Eigen SparseQR on J
+vs
+gauge-reduced J^T J + Eigen SimplicialLDLT
+```
+
+They are **not** a claim of outperforming GTSAM, g2o, or the official SE-Sync solver.
+
+---
+
+## 10. Solver / Trajectory Agreement
+
+The validation exporter stores:
+
+```text
+qr_iterations.csv
+ldlt_iterations.csv
+qr_trajectory_trace.csv
+ldlt_trajectory_trace.csv
+qr_final.csv
+ldlt_final.csv
+metadata.txt
+```
+
+The comparison uses rigid SE(2) alignment with rotation + translation only; no scale is fitted.
+
+Representative results:
+
+### CSAIL
+
+```text
+relative final-cost gap           2.24e-15
+aligned ATE RMSE                  2.76e-14 m
+max position error                4.58e-14 m
+heading RMSE                      4.74e-16 rad
+```
+
+### MIT
+
+```text
+relative final-cost gap           ~1e-15
+aligned position disagreement     ~1e-12 m
+heading disagreement              ~1e-14 rad
+```
+
+The QR and LDLT nonlinear trajectories are therefore numerically indistinguishable for the tested graphs.
+
+---
+
+## 11. External Validation: GTSAM
+
+GTSAM was added as an external diagnostic reference to distinguish:
+
+- objective mismatch,
+- initialization sensitivity,
+- local solver behavior.
+
+### GTSAM Gauss-Newton
+
+On the raw MIT initialization, GTSAM Gauss-Newton encountered an indeterminate / poorly conditioned system with its default Cholesky path.
+
+Using a QR backend allowed the solve to proceed, but pure GN increased the GTSAM objective and stopped after one iteration.
+
+### GTSAM Levenberg-Marquardt
+
+Using LM + QR:
+
+```text
+Initial GTSAM error               3.548660355e9
+Final GTSAM error                 385.119492
+Iterations                        29
+Wall time                         ~117 ms
+```
+
+However, GTSAM's standard Pose2 objective is **not the same scalar objective** as the SE-Sync matrix-difference formulation used here.
+
+Cross-evaluation makes this explicit:
+
+```text
+Trajectory                  GTSAM objective       SE-Sync objective
+-------------------------------------------------------------------
+GTSAM LM solution              385.12                 1360.87
+Our local GN/LDLT solution   48248.86                 1298.03
+```
+
+This experiment is diagnostic only. It demonstrates that low cost under one formulation cannot be compared directly with low cost under the other.
+
+---
+
+## 12. Official SE-Sync Reference and Global Optimum
+
+The official SE-Sync implementation was run on the **same MIT dataset**.
+
+It reported:
+
+```text
+Loaded measurements                 827
+Poses                               808
+Initialization                      chordal
+Chordal initial objective           88.1316
+Final objective                     61.1541
+Riemannian gradient norm            3.604e-03
+SDP duality gap                     -8.53e-14
+Rounded-pose suboptimality bound    -4.74e-12
+Result                              global optimum certified
+```
+
+The rounded official trajectory was exported and evaluated independently inside this repository.
+
+### Independent Python evaluator
+
+```text
+Rotation cost                       41.0850352038581
+Translation cost                    20.0690808879390
+Total                               61.1541160917972
+```
+
+### Handwritten C++ and SymForce evaluators
+
+```text
+Reference PGO cost                  61.1541160917971
+SymForce PGO cost                   61.1541160917971
+Absolute difference                 2.84e-14
+Relative difference                 4.65e-16
+```
+
+This is a strong end-to-end validation that:
+
+1. the dataset precision conversion matches the intended SE-Sync objective;
+2. the handwritten objective matches official SE-Sync's recovered trajectory;
+3. the SymForce-generated residual matches the handwritten evaluator;
+4. the remaining `1298` result from raw MIT vertices is not an objective-definition bug.
+
+---
+
+## 13. Initialization Sensitivity: Main Current Finding
+
+Starting from the raw MIT `VERTEX_SE2` values:
+
+```text
+Initial SE-Sync cost                649214.841883749
+Our GN final cost                   1298.03279183363
+Iterations                          69
+```
+
+Starting from the GTSAM-LM trajectory:
+
+```text
+Initial SE-Sync cost                1360.86786651290
+Our GN final cost                   1298.04314018996
+Iterations                          59
+```
+
+Starting from the official certified SE-Sync trajectory:
+
+```text
+Initial SE-Sync cost                61.1541160917971
+QR final cost                       61.1541155246367
+LDLT final cost                     61.1541155246369
+Iterations                          4
+```
+
+The important observation is therefore:
+
+```text
+very different poor starts
+        |
+        v
+local Gauss-Newton
+        |
+        v
+~1298 basin
+```
+
+while
+
+```text
+certified SE-Sync trajectory
+        |
+        v
+our exact same GN / QR / LDLT machinery
+        |
+        v
+~61.1541
+```
+
+So the current local residual, Jacobian, sparse assembly, and LDLT backend are capable of operating correctly around the globally optimal trajectory.
+
+The open problem is **how to reach the correct basin without relying on a supplied high-quality pose estimate**.
+
+---
+
+## 14. Current Baselines and Next Research Direction
+
+### Baseline A: local sparse optimization
+
+```text
+dataset / supplied trajectory
+        ↓
+SymForce residual + Jacobian
+        ↓
+sparse graph assembly
+        ↓
+GN + line search
+        ↓
+SparseQR or LDLT
+```
+
+This path is implemented and validated.
+
+### Baseline B: chordal initialization + local optimization
+
+Official SE-Sync demonstrates that chordal initialization starts the MIT problem near
+
+```text
+88.1316
+```
+
+rather than
+
+```text
+649214.84.
+```
+
+A local chordal + GN/LDLT implementation is therefore a useful practical baseline.
+
+### Research direction under evaluation
+
+The next direction is intentionally being separated into two possibilities.
+
+#### A. Initialization-robust local methods
+
+Candidate experiments:
+
+- Levenberg-Marquardt,
+- trust-region methods,
+- continuation / damping,
+- multistart,
+- random / corrupted initial-pose stress tests.
+
+These methods may escape poor local basins, but do not by themselves provide a global-optimality certificate.
+
+#### B. Certifiable reduced-\(Q\) optimization
+
+Because the exact translation-eliminated matrix \(Q\) is already derived and validated, the second direction is to study a global/certifiable relaxation of
+
+```math
+F_{\mathrm{red}}(R)
+=
+\operatorname{tr}(RQR^\top).
+```
+
+Possible implementation sequence:
+
+```text
+small explicit SDP reference
+        ↓
+validate against official SE-Sync
+        ↓
+low-rank factorization
+        ↓
+scalable Riemannian / structured solver
+        ↓
+round rotations
+        ↓
+recover translations analytically
+        ↓
+compare feasible objective with SDP lower bound
+```
+
+A separate alternative reference under consideration is certified rotation averaging followed by analytical translation recovery.
+
+No SDP relaxation, low-rank staircase, or global certification is claimed as implemented in this repository yet.
+
+---
+
+## 15. Schur Complement / Variable Projection
+
+The local Gauss-Newton normal matrix is partitioned as
+
+```math
+H
 =
 \begin{bmatrix}
-0 & -1 \\
-1 & 0
-\end{bmatrix}
+H_{cc} & H_{cf}\\
+H_{fc} & H_{ff}
+\end{bmatrix},
+\qquad
+g
+=
+\begin{bmatrix}
+g_c\\
+g_f
+\end{bmatrix}.
 ```
 
-For SO(2),
+After gauge handling, translations can be locally eliminated:
 
 ```math
-\frac{\partial R(\theta)}
-{\partial\theta}
+S
 =
-R(\theta)J_2
-```
-
-Therefore, the translation residual has derivatives
-
-```math
-\frac{\partial r^t_{ij}}
-{\partial t_i}
-=
--\sqrt{\tau_{ij}}I
-```
-
-```math
-\frac{\partial r^t_{ij}}
-{\partial t_j}
-=
-+\sqrt{\tau_{ij}}I
-```
-
-and
-
-```math
-\frac{\partial r^t_{ij}}
-{\partial\theta_i}
-=
--\sqrt{\tau_{ij}}
-R_iJ_2\tilde{t}_{ij}
-```
-
-The rotational residual derivatives are
-
-```math
-\frac{\partial r^R_{ij}}
-{\partial\theta_i}
-=
--\sqrt{\kappa_{ij}}
-R_iJ_2\tilde{R}_{ij}
-```
-
-```math
-\frac{\partial r^R_{ij}}
-{\partial\theta_j}
-=
-+\sqrt{\kappa_{ij}}
-R_jJ_2
-```
-
-The generated Jacobian is structurally sparse because each residual depends only on the variables associated with the two connected poses.
-
----
-
-## 6. SymForce Code-Generation Pipeline
-
-The symbolic implementation lives in
-
-```text
-codegen/python/generate_pgo_residuals.py
-```
-
-The current pipeline is
-
-```text
-Symbolic SE-Sync residual in Python
-              |
-              v
-Symbolic differentiation
-              |
-              v
-Common-subexpression elimination
-              |
-              v
-Generated Eigen/C++ kernels
-              |
-              +--> generated/edge_residual.h
-              |
-              +--> generated/edge_jacobian.h
-```
-
-The generated files are runtime kernels and should normally not be edited manually.
-
-Repeated symbolic expressions are extracted into temporary variables such as
-
-```text
-_tmp0
-_tmp1
-_tmp2
-...
-```
-
-during code generation.
-
-The generated kernels are wrapped by
-
-```text
-src/symforce_pgo_cost.cpp
-```
-
-which adapts the existing project data types to the generated SymForce functions.
-
-For the current SO(2) implementation, the wrapper recovers the angle associated with an existing rotation matrix using
-
-```math
-\theta
-=
-\mathrm{atan2}
-(R_{10},R_{00})
-```
-
-and then evaluates the generated residual or Jacobian.
-
----
-
-## 7. SymForce Numerical Validation
-
-Two independent levels of validation are currently implemented.
-
-### 7.1 Edge-Level Residual and Jacobian Validation
-
-The handwritten edge residual is compared directly against the SymForce-generated residual.
-
-The scalar edge cost is also compared using
-
-```math
-F_{ij}
-=
-\left\|r_{ij}\right\|_2^2
-```
-
-The generated Jacobian is independently checked using central finite differences:
-
-```math
-J_k^{\mathrm{FD}}
-=
-\frac{
-r(x+\epsilon e_k)
+H_{cc}
 -
-r(x-\epsilon e_k)
-}{
-2\epsilon
-}
+H_{cf}
+H_{ff}^{-1}
+H_{fc},
 ```
 
-with
+with reduced right-hand side
 
 ```math
-\epsilon
+b_S
 =
-10^{-6}
+-g_c
++
+H_{cf}H_{ff}^{-1}g_f.
 ```
 
-Current numerical results:
+The implementation should never explicitly form \(H_{ff}^{-1}\); factorization solves are used instead.
+
+This remains an important performance direction, but it solves a different problem from initialization robustness:
 
 ```text
-Residual equivalence error:        2.002685474353e-16
-Cost equivalence error:            5.551115123126e-17
-Jacobian finite-difference error:  1.654302250742e-10
+Schur / VarPro
+    -> reduce computation
+
+global / certifiable method
+    -> reduce dependence on local nonlinear basin
 ```
 
-These differences are consistent with floating-point numerical precision.
-
-### 7.2 Full Graph Validation
-
-A separate three-pose, three-edge graph is used to verify that the generated edge kernels also reproduce the complete PGO objective.
-
-The graph contains
-
-```text
-0 -> 1
-1 -> 2
-0 -> 2
-```
-
-Current result:
-
-```text
-Reference full PGO cost:  0.243919071312716
-SymForce full PGO cost:   0.243919071312716
-```
-
-The per-edge rotational, translational, and total costs agree to approximately machine precision.
+The two directions can later be combined in a structured solver.
 
 ---
 
-## 8. Numerical Validation Summary
-
-For the original perturbed three-pose SE-Sync formulation:
-
-```text
-Direct PGO cost:                  0.449279443492
-Explicit cost at t*(R):           0.232564837850
-Simplified Q cost:                0.232564837850
-Explicit vs simplified diff:      0.000000000000
-```
-
-The implementation checks
-
-```text
-Direct translation residual == B1 * t + B2 * r
-Direct rotation residual    == B3 * r
-
-Direct PGO cost == B1/B2/B3 cost
-Direct PGO cost == explicit M cost
-
-Explicit cost at t*(R) == simplified Q cost
-
-Q  == Q^T
-Pi == Pi^T
-Pi^2 == Pi
-```
-
-The SymForce stage additionally checks
-
-```text
-Handwritten edge residual == generated SymForce residual
-Handwritten edge cost     == generated SymForce edge cost
-
-Generated Jacobian ~= central finite-difference Jacobian
-
-Handwritten full graph cost == SymForce full graph cost
-```
-
-Current CTest status:
-
-```text
-5/5 tests passed
-```
-
----
-
-## Repository Structure
+## 16. Repository Structure
 
 ```text
 .
-├── apps
+├── apps/
+│   ├── benchmark_g2o.cpp
+│   ├── benchmark_linear_solvers.cpp
+│   ├── benchmark_optimizer_solvers.cpp
+│   ├── export_solver_validation.cpp
+│   ├── export_trajectory.cpp
 │   ├── matrix_equivalence.cpp
+│   ├── optimize_g2o.cpp
 │   ├── reference_pgo.cpp
 │   └── simplified_equivalence.cpp
 │
-├── cmake
+├── cmake/
 │   └── SymForceStage.cmake
 │
-├── codegen
-│   └── python
-│       └── generate_pgo_residuals.py
+├── codegen/python/
+│   └── generate_pgo_residuals.py
 │
-├── generated
+├── generated/
 │   ├── edge_jacobian.h
 │   └── edge_residual.h
 │
-├── include
-│   └── cora_symforce
-│       ├── measurement.hpp
-│       ├── pgo_cost.hpp
-│       ├── pose2.hpp
-│       ├── sesync_matrices.hpp
-│       ├── simplified_pgo.hpp
-│       ├── symforce_pgo_cost.hpp
-│       └── toy_problem.hpp
+├── include/cora_symforce/
+│   ├── g2o_dataset.hpp
+│   ├── gauss_newton.hpp
+│   ├── graph_linearization.hpp
+│   ├── measurement.hpp
+│   ├── pgo_cost.hpp
+│   ├── pose2.hpp
+│   ├── sesync_matrices.hpp
+│   ├── simplified_pgo.hpp
+│   ├── symmetric_solver.hpp
+│   ├── symforce_pgo_cost.hpp
+│   ├── toy_problem.hpp
+│   └── trajectory_io.hpp
 │
-├── src
+├── scripts/
+│   ├── plot_solver_validation.py
+│   ├── evaluate_sesync_trajectory.py
+│   └── csv_to_vertex_g2o.py
+│
+├── src/
+│   ├── g2o_dataset.cpp
+│   ├── gauss_newton.cpp
+│   ├── graph_linearization.cpp
 │   ├── pgo_cost.cpp
 │   ├── sesync_matrices.cpp
 │   ├── simplified_pgo.cpp
+│   ├── symmetric_solver.cpp
 │   ├── symforce_pgo_cost.cpp
-│   └── toy_problem.cpp
+│   ├── toy_problem.cpp
+│   └── trajectory_io.cpp
 │
-├── tests
+├── tests/
+│   ├── test_g2o_dataset.cpp
+│   ├── test_gauss_newton.cpp
+│   ├── test_graph_linearization.cpp
 │   ├── test_matrix_equivalence.cpp
 │   ├── test_reference_pgo.cpp
 │   ├── test_simplified_equivalence.cpp
+│   ├── test_symmetric_solver.cpp
 │   ├── test_symforce_edge_equivalence.cpp
+│   ├── test_symforce_linearization.cpp
 │   └── test_symforce_pgo_cost.cpp
 │
+├── tools/gtsam_reference/
+│   ├── gtsam_reference.cpp
+│   └── gtsam_cost_eval.cpp
+│
 ├── CMakeLists.txt
-├── README.md
-└── requirements-lock.txt
+└── README.md
 ```
+
+Generated result folders and datasets are intentionally not part of the tracked source tree.
 
 ---
 
-## Main Implementation Files
+## 17. Main Implementation Files
 
 ### `src/pgo_cost.cpp`
 
-Direct implementation of the weighted pose-graph residuals and objective.
+Independent handwritten implementation of the weighted SE-Sync pose-graph objective.
 
 ### `src/sesync_matrices.cpp`
 
-Construction of `B1`, `B2`, `B3`, and the explicit quadratic data matrix `M`.
+Constructs the \(B_1,B_2,B_3\) residual operators and explicit quadratic formulation.
 
 ### `src/simplified_pgo.cpp`
 
-Construction of the graph matrices, translation gauge removal, translation elimination, projection `Pi`, and reduced rotation-only matrix `Q`.
+Implements exact translation elimination, gauge handling, projection \(\Pi\), and reduced rotation-only \(Q\).
 
 ### `codegen/python/generate_pgo_residuals.py`
 
-Defines the exact weighted SE-Sync residual symbolically, computes its Jacobian, and generates the C++ residual and Jacobian kernels.
-
-### `generated/edge_residual.h`
-
-Autogenerated C++ implementation of the symbolic edge residual.
-
-### `generated/edge_jacobian.h`
-
-Autogenerated C++ implementation of the symbolic edge Jacobian.
+Defines the exact SE-Sync edge residual symbolically and generates C++ residual/Jacobian kernels.
 
 ### `src/symforce_pgo_cost.cpp`
 
-Adapter between the existing C++ pose/measurement structures and the generated SymForce kernels.
+C++ adapter between project pose/measurement types and generated SymForce kernels.
 
-### `tests/test_symforce_edge_equivalence.cpp`
+### `src/graph_linearization.cpp`
 
-Checks generated residual equivalence, cost equivalence, and generated Jacobian accuracy against central finite differences.
+Scatters edge-local Jacobians into global sparse \(J_c,J_f\) and forms local Gauss-Newton blocks.
 
-### `tests/test_symforce_pgo_cost.cpp`
+### `src/gauss_newton.cpp`
 
-Checks full-graph equivalence between the handwritten PGO implementation and the SymForce-generated implementation.
+Nonlinear Gauss-Newton loop, line search, convergence tests, and selectable SparseQR / symmetric LDLT backend.
+
+### `src/symmetric_solver.cpp`
+
+Controlled frozen-linearization QR-vs-LDLT comparison with rank, timing, residual-space equivalence, and normal-equation checks.
+
+### `src/g2o_dataset.cpp`
+
+Loads `VERTEX_SE2` / `EDGE_SE2` datasets and converts g2o information entries to the SE-Sync precision model.
+
+### `src/trajectory_io.cpp`
+
+Handles dataset trajectory initialization, measurement propagation for edge-only graphs, and trajectory export.
+
+### `apps/export_solver_validation.cpp`
+
+Exports nonlinear iteration traces and final trajectories for numerical/visual solver comparison.
+
+### `tools/gtsam_reference/`
+
+External GTSAM diagnostic tools used to compare objective behavior and nonlinear convergence.
 
 ---
 
-## Build
+## 18. Build
 
 ### Requirements
+
+Core project:
 
 - C++17
 - CMake
@@ -760,258 +1117,183 @@ Checks full-graph equivalence between the handwritten PGO implementation and the
 - Python 3
 - SymForce for symbolic code generation
 
-The Python environment used for code generation is isolated from the C++ runtime.
-
-Install the Python dependencies in the project virtual environment as required by `requirements-lock.txt`.
-
-Generate the SymForce C++ kernels:
+Generate the C++ kernels:
 
 ```bash
-.venv/bin/python codegen/python/generate_pgo_residuals.py
+.venv/bin/python \
+  codegen/python/generate_pgo_residuals.py
 ```
 
 Configure and build:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
+cmake \
+  -S . \
+  -B build \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build \
+  build \
+  -j"$(nproc)"
 ```
 
-Run the formulation experiments:
+Run the regression suite:
 
 ```bash
-./build/reference_pgo
-./build/matrix_equivalence
-./build/simplified_equivalence
+ctest \
+  --test-dir build \
+  --output-on-failure
 ```
 
-Run the SymForce validation executables:
+Current core regression status:
+
+```text
+100% tests passed
+0 tests failed
+11/11 tests passed
+```
+
+---
+
+## 19. Useful Experiments
+
+### Dataset formulation / sparse structure
 
 ```bash
-./build/test_symforce_edge_equivalence
-./build/test_symforce_pgo_cost
+./build/benchmark_g2o \
+  data/MIT.g2o
 ```
 
-Run the complete regression suite:
+### Long-run MIT convergence diagnosis
 
 ```bash
-ctest --test-dir build --output-on-failure
+mkdir -p results/solver_validation/MIT_200
+
+./build/export_solver_validation \
+  data/MIT.g2o \
+  results/solver_validation/MIT_200 \
+  200
 ```
 
-Expected current result:
+### Plot QR / LDLT agreement
 
-```text
-100% tests passed, 0 tests failed out of 5
+```bash
+python3 scripts/plot_solver_validation.py \
+  results/solver_validation/MIT_200 \
+  --label MIT
 ```
 
----
+### Evaluate an external trajectory under the SE-Sync objective
 
-## Current Progress
-
-The formulation and generated-code path currently implemented is
-
-```text
-Direct PGO residuals
-        |
-        v
-B1 / B2 / B3 representation
-        |
-        v
-Explicit quadratic matrix M
-        |
-        v
-Translation elimination
-        |
-        v
-Projector Pi
-        |
-        v
-Reduced rotation-only Q
-        |
-        v
-Exact SE-Sync residual in SymForce
-        |
-        v
-Generated C++ residual
-        |
-        +------------------+
-        |                  |
-        v                  v
-Generated Jacobian    C++ PGO wrapper
-        |                  |
-        v                  v
-Finite-difference     Full-graph
-validation            equivalence
-        |                  |
-        +--------+---------+
-                 |
-                 v
-           Current stage
-              complete
-```
-
-The repository currently establishes numerical equivalence between
-
-```math
-F_{\mathrm{direct}}
-=
-F_{B_1,B_2,B_3}
-=
-F_M
-```
-
-and, after translation elimination,
-
-```math
-F(R,t^\star(R))
-=
-F_Q(R)
-```
-
-while independently validating
-
-```math
-r_{\mathrm{handwritten}}
-\approx
-r_{\mathrm{SymForce}}
-```
-
-```math
-J_{\mathrm{SymForce}}
-\approx
-J_{\mathrm{finite\ difference}}
-```
-
-and
-
-```math
-F_{\mathrm{handwritten\ graph}}
-\approx
-F_{\mathrm{SymForce\ graph}}
+```bash
+python3 scripts/evaluate_sesync_trajectory.py \
+  data/MIT.g2o \
+  trajectory_vertices.g2o
 ```
 
 ---
 
-## Next Step: Schur Complement / Variable Projection
+## 20. What Has Been Established
 
-The next implementation stage is structured variable elimination using a block Schur complement.
-
-The explicit quadratic formulation can be partitioned into translation and rotation blocks:
-
-```math
-M
-=
-\begin{bmatrix}
-M_{tt} & M_{tr} \\
-M_{rt} & M_{rr}
-\end{bmatrix}
-```
-
-where translations are the variables to be eliminated.
-
-Because global translation introduces a gauge freedom, the translation block must first be made full rank through the same gauge-removal principle already used in the simplified SE-Sync formulation.
-
-After gauge removal, the translation solution has the form
-
-```math
-t^\star
-=
--
-M_{tt}^{-1}
-M_{tr}r
-```
-
-and substitution produces the rotation-only Schur complement
-
-```math
-Q_{\mathrm{Schur}}
-=
-M_{rr}
--
-M_{rt}
-M_{tt}^{-1}
-M_{tr}
-```
-
-The first validation goal will be
-
-```math
-Q_{\mathrm{Schur}}
-\approx
-Q
-```
-
-where `Q` is the already validated projector-based reduced SE-Sync matrix.
-
-This will establish two equivalent views of the same analytical translation elimination:
+The repository currently supports the following claims:
 
 ```text
-Projector formulation
-        |
-        v
-Pi = I - B^T(BB^T)^(-1)B
-        |
-        v
-Reduced Q
+[validated]
+Direct PGO objective
+       ==
+B1 / B2 / B3 formulation
+       ==
+explicit quadratic M
 
-        ==
+[validated]
+F(R, t*(R))
+       ==
+tr(R Q R^T)
 
-Block quadratic formulation
-        |
-        v
-Translation Schur elimination
-        |
-        v
-Reduced Q_Schur
+[validated]
+handwritten residual
+       ==
+SymForce-generated residual
+
+[validated]
+generated Jacobian
+       ~= finite differences
+
+[validated]
+local SparseQR correction
+       ~= gauge-reduced LDLT correction
+
+[validated]
+QR and LDLT nonlinear trajectories
+       ~= numerical precision
+
+[validated]
+official SE-Sync certified MIT trajectory
+       ==
+our handwritten SE-Sync objective
+       ==
+our SymForce-generated objective
+       ~= 61.1541161
+
+[observed]
+raw MIT vertices + local GN
+       -> ~1298 local basin
+
+[not yet implemented]
+initialization-independent global/certifiable solver
 ```
-
-Only after this equivalence is established will the implementation move toward sparse or matrix-free application of the reduced operator, following the later SPARSER-style research direction.
 
 ---
 
-## Out of Scope / Not Yet Implemented
+## 21. Current Research Status
 
-The repository does **not** currently claim implementation of:
+The project has moved beyond formulation reproduction.
 
-- SPARSER matrix-free Schur application,
-- Schur-based preconditioning,
-- velocity or other non-pairwise residual extensions,
-- CORA range residuals,
-- SDP relaxation,
-- Burer-Monteiro factorization,
-- Riemannian Staircase,
-- global optimality certification,
-- a complete SE-Sync solver,
-- a complete CORA solver.
+The current evidence says:
 
-The current objective is to build each formulation layer with independent numerical checks before progressing to the next optimization stage.
+1. **Objective correctness is established.**
+2. **Generated residual/Jacobian correctness is established.**
+3. **Sparse graph assembly is established.**
+4. **QR-vs-LDLT equivalence is established.**
+5. **The symmetric sparse backend removes a major measured linear-solve bottleneck on the tested SE(2) graphs.**
+6. **Official SE-Sync cross-validation confirms the globally optimal MIT objective at approximately 61.1541.**
+7. **The remaining scientific problem is not the local linear solve; it is nonlinear initialization / global recovery.**
+
+The next implementation direction is being chosen around that final point, while chordal + local GN/LDLT remains the practical baseline and explicit Schur/VarPro remains the structured-computation path.
 
 ---
 
-## Research Direction
+## 22. Scope / Non-Claims
 
-The current research progression is
+This repository currently does **not** claim:
+
+- a complete SE-Sync reimplementation;
+- implementation of SE-Sync's Riemannian Staircase;
+- an internal SDP global-optimality certificate;
+- CORA range-variable optimization;
+- SE(3) dataset support;
+- superiority over GTSAM, g2o, SE-Sync, or other mature SLAM libraries;
+- universal QR-to-LDLT speedups;
+- robustness to arbitrary poor initialization.
+
+The official SE-Sync implementation is currently used as the external certified reference for global-optimum validation.
+
+---
+
+## 23. Immediate Next Milestones
 
 ```text
-Validated SE-Sync formulation
-        |
-        v
-Validated SymForce residual / Jacobian generation
-        |
-        v
-Schur-complement equivalence
-        |
-        v
-Sparse / matrix-free reduced operator
-        |
-        v
-Solver and preconditioning experiments
-        |
-        v
-Non-pairwise / velocity residual investigation
-        |
-        v
-Broader CORA integration
+1. Keep chordal + GN/LDLT as practical baseline
+2. Stress-test poor / random / missing pose initialization
+3. Choose between:
+      a) robust local globalization
+         (LM / trust-region / multistart)
+      b) certifiable reduced-Q optimization
+         (explicit SDP reference -> scalable low-rank method)
+4. Validate against official SE-Sync
+5. Implement explicit local Schur complement / VarPro
+6. Study sparse or matrix-free reduced operators
+7. Extend to SE(3) only after the 2D path is understood
 ```
 
-The handwritten SE-Sync implementation remains the numerical reference while SymForce is used as a symbolic differentiation and C++ code-generation layer.
+The central target is no longer merely to make the local solve faster. It is to understand how solver structure, initialization, and global optimality interact while preserving an independently validated SE-Sync objective.
