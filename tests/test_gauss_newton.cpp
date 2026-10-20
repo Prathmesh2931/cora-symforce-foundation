@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -20,6 +21,93 @@ bool finitePoses(const std::vector<cora_symforce::Pose2State>& poses) {
   return true;
 }
 
+bool validateResult(
+    const char* label,
+    const double initial_cost,
+    const cora_symforce::GaussNewtonResult& result) {
+  using namespace cora_symforce;
+
+  const double final_cost = result.final_cost;
+
+  std::cout << "\n" << label << '\n';
+  std::cout << "Initial cost       : " << initial_cost << '\n';
+  std::cout << "Final cost         : " << final_cost << '\n';
+  std::cout << "Iterations         : " << result.iterations.size() << '\n';
+  std::cout << "Converged          : "
+            << (result.converged ? "yes" : "no") << '\n';
+  std::cout << "Termination        : "
+            << result.termination_reason << '\n';
+  std::cout << "Solve total [ms]   : "
+            << result.total_solve_time_ms << '\n';
+
+  if (!result.iterations.empty()) {
+    const GaussNewtonIteration& last = result.iterations.back();
+    std::cout << "Last rank/dim      : " << last.numerical_rank << '\n';
+    std::cout << "Last gradient norm : " << last.gradient_norm << '\n';
+    std::cout << "Last step norm     : " << last.step_norm << '\n';
+  }
+
+  bool passed = true;
+
+  if (!(final_cost < initial_cost)) {
+    std::cerr << "FAILED " << label << ": objective did not decrease.\n";
+    passed = false;
+  }
+
+  if (!(final_cost < 1e-10)) {
+    std::cerr << "FAILED " << label
+              << ": optimizer did not recover zero-residual toy graph.\n";
+    passed = false;
+  }
+
+  if (!finitePoses(result.poses)) {
+    std::cerr << "FAILED " << label << ": optimized poses contain NaN/Inf.\n";
+    passed = false;
+  }
+
+  if (!result.converged) {
+    std::cerr << "FAILED " << label
+              << ": optimizer did not report convergence.\n";
+    passed = false;
+  }
+
+  if (result.trajectory_history.empty()) {
+    std::cerr << "FAILED " << label
+              << ": trajectory history was not recorded.\n";
+    passed = false;
+  } else {
+    if (result.trajectory_history.size() != result.iterations.size() + 1) {
+      std::cerr << "FAILED " << label
+                << ": trajectory history length is inconsistent.\n";
+      passed = false;
+    }
+
+    const auto& recorded_final = result.trajectory_history.back();
+    if (recorded_final.size() != result.poses.size()) {
+      std::cerr << "FAILED " << label
+                << ": recorded final trajectory size is inconsistent.\n";
+      passed = false;
+    } else {
+      double max_difference = 0.0;
+      for (std::size_t i = 0; i < result.poses.size(); ++i) {
+        max_difference = std::max(
+            max_difference,
+            (recorded_final[i].R - result.poses[i].R).norm());
+        max_difference = std::max(
+            max_difference,
+            (recorded_final[i].t - result.poses[i].t).norm());
+      }
+      if (max_difference > 1e-12) {
+        std::cerr << "FAILED " << label
+                  << ": recorded final trajectory does not match result.\n";
+        passed = false;
+      }
+    }
+  }
+
+  return passed;
+}
+
 }  // namespace
 
 int main() {
@@ -28,65 +116,43 @@ int main() {
   const ToyProblem problem = makeToyProblem();
 
   const double initial_cost =
-      evaluateSymForcePgo(
-          problem.initial_guess,
-          problem.measurements)
-          .total;
+      evaluateSymForcePgo(problem.initial_guess, problem.measurements).total;
 
-  GaussNewtonOptions options;
-  options.max_iterations = 30;
-  options.gradient_tolerance = 1e-10;
-  options.step_tolerance = 1e-12;
-  options.relative_cost_tolerance = 1e-14;
+  GaussNewtonOptions qr_options;
+  qr_options.max_iterations = 30;
+  qr_options.gradient_tolerance = 1e-10;
+  qr_options.step_tolerance = 1e-12;
+  qr_options.relative_cost_tolerance = 1e-14;
+  qr_options.linear_solver = GaussNewtonLinearSolver::kSparseQr;
+  qr_options.record_trajectory_history = true;
 
-  const GaussNewtonResult result =
+  GaussNewtonOptions ldlt_options = qr_options;
+  ldlt_options.linear_solver = GaussNewtonLinearSolver::kSymmetricLdlt;
+
+  const GaussNewtonResult qr_result =
       optimizeGaussNewton(
           problem.initial_guess,
           problem.measurements,
-          options);
+          qr_options);
 
-  const double final_cost =
-      evaluateSymForcePgo(
-          result.poses,
-          problem.measurements)
-          .total;
+  const GaussNewtonResult ldlt_result =
+      optimizeGaussNewton(
+          problem.initial_guess,
+          problem.measurements,
+          ldlt_options);
 
   std::cout << std::setprecision(15);
-  std::cout << "Initial cost       : " << initial_cost << '\n';
-  std::cout << "Final cost         : " << final_cost << '\n';
-  std::cout << "Iterations         : " << result.iterations.size() << '\n';
-  std::cout << "Converged          : "
-            << (result.converged ? "yes" : "no") << '\n';
-  std::cout << "Termination        : "
-            << result.termination_reason << '\n';
-
-  if (!result.iterations.empty()) {
-    const GaussNewtonIteration& last = result.iterations.back();
-    std::cout << "Last numerical rank: " << last.numerical_rank << '\n';
-    std::cout << "Last gradient norm : " << last.gradient_norm << '\n';
-    std::cout << "Last step norm     : " << last.step_norm << '\n';
-  }
 
   bool passed = true;
+  passed &= validateResult("SparseQR", initial_cost, qr_result);
+  passed &= validateResult("Symmetric LDLT", initial_cost, ldlt_result);
 
-  if (!(final_cost < initial_cost)) {
-    std::cerr << "FAILED: objective did not decrease.\n";
-    passed = false;
-  }
+  const double final_cost_gap =
+      std::abs(qr_result.final_cost - ldlt_result.final_cost);
+  std::cout << "\nFinal cost gap QR vs LDLT : " << final_cost_gap << '\n';
 
-  if (!(final_cost < 1e-10)) {
-    std::cerr
-        << "FAILED: optimizer did not recover the zero-residual toy graph.\n";
-    passed = false;
-  }
-
-  if (!finitePoses(result.poses)) {
-    std::cerr << "FAILED: optimized poses contain NaN/Inf.\n";
-    passed = false;
-  }
-
-  if (!result.converged) {
-    std::cerr << "FAILED: optimizer did not report convergence.\n";
+  if (!std::isfinite(final_cost_gap) || final_cost_gap > 1e-10) {
+    std::cerr << "FAILED: QR and LDLT final toy costs disagree.\n";
     passed = false;
   }
 
@@ -94,6 +160,6 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  std::cout << "\nGauss-Newton synthetic optimization PASSED.\n";
+  std::cout << "\nGauss-Newton QR/LDLT optimization PASSED.\n";
   return EXIT_SUCCESS;
 }

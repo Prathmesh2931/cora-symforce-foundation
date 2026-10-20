@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <Eigen/OrderingMethods>
+#include <Eigen/SparseCholesky>
 #include <Eigen/SparseCore>
 #include <Eigen/SparseQR>
 
@@ -21,6 +22,11 @@ namespace {
 using SparseMatrix = Eigen::SparseMatrix<double>;
 using Triplet = Eigen::Triplet<double>;
 using Clock = std::chrono::steady_clock;
+
+struct ReducedJacobian {
+  SparseMatrix matrix;
+  std::vector<Eigen::Index> reduced_to_full;
+};
 
 double milliseconds(
     const Clock::time_point& start,
@@ -68,6 +74,74 @@ SparseMatrix combineJacobians(const GraphLinearization& linearization) {
   return J;
 }
 
+ReducedJacobian removeTranslationGaugeColumns(
+    const SparseMatrix& J,
+    const Eigen::Index constrained_cols) {
+  const Eigen::Index fixed_tx = constrained_cols;
+  const Eigen::Index fixed_ty = constrained_cols + 1;
+
+  if (constrained_cols <= 0 || fixed_ty >= J.cols()) {
+    throw std::invalid_argument(
+        "Jacobian does not contain pose-0 translation columns.");
+  }
+
+  ReducedJacobian reduced;
+  reduced.reduced_to_full.reserve(
+      static_cast<std::size_t>(J.cols() - 2));
+
+  std::vector<Eigen::Index> full_to_reduced(
+      static_cast<std::size_t>(J.cols()), -1);
+
+  Eigen::Index reduced_col = 0;
+  for (Eigen::Index full_col = 0; full_col < J.cols(); ++full_col) {
+    if (full_col == fixed_tx || full_col == fixed_ty) {
+      continue;
+    }
+
+    full_to_reduced[static_cast<std::size_t>(full_col)] = reduced_col;
+    reduced.reduced_to_full.push_back(full_col);
+    ++reduced_col;
+  }
+
+  std::vector<Triplet> triplets;
+  triplets.reserve(static_cast<std::size_t>(J.nonZeros()));
+
+  for (Eigen::Index outer = 0; outer < J.outerSize(); ++outer) {
+    for (SparseMatrix::InnerIterator it(J, outer); it; ++it) {
+      const Eigen::Index mapped =
+          full_to_reduced[static_cast<std::size_t>(it.col())];
+      if (mapped >= 0) {
+        triplets.emplace_back(it.row(), mapped, it.value());
+      }
+    }
+  }
+
+  reduced.matrix.resize(J.rows(), J.cols() - 2);
+  reduced.matrix.setFromTriplets(triplets.begin(), triplets.end());
+  reduced.matrix.makeCompressed();
+  return reduced;
+}
+
+Eigen::VectorXd expandReducedDelta(
+    const Eigen::VectorXd& reduced_delta,
+    const ReducedJacobian& reduced,
+    const Eigen::Index full_size) {
+  Eigen::VectorXd full = Eigen::VectorXd::Zero(full_size);
+
+  if (reduced_delta.size() !=
+      static_cast<Eigen::Index>(reduced.reduced_to_full.size())) {
+    throw std::invalid_argument(
+        "Reduced delta dimension does not match reduced Jacobian.");
+  }
+
+  for (Eigen::Index k = 0; k < reduced_delta.size(); ++k) {
+    full(reduced.reduced_to_full[static_cast<std::size_t>(k)]) =
+        reduced_delta(k);
+  }
+
+  return full;
+}
+
 bool vectorIsFinite(const Eigen::VectorXd& vector) {
   return vector.array().isFinite().all();
 }
@@ -103,6 +177,16 @@ std::vector<Pose2State> applyIncrement(
 
 }  // namespace
 
+const char* gaussNewtonLinearSolverName(const GaussNewtonLinearSolver solver) {
+  switch (solver) {
+    case GaussNewtonLinearSolver::kSparseQr:
+      return "sparse_qr";
+    case GaussNewtonLinearSolver::kSymmetricLdlt:
+      return "symmetric_ldlt";
+  }
+  return "unknown";
+}
+
 GaussNewtonResult optimizeGaussNewton(
     const std::vector<Pose2State>& initial_poses,
     const std::vector<RelativePoseMeasurement>& measurements,
@@ -129,6 +213,9 @@ GaussNewtonResult optimizeGaussNewton(
 
   GaussNewtonResult result;
   result.poses = initial_poses;
+  if (options.record_trajectory_history) {
+    result.trajectory_history.push_back(result.poses);
+  }
   result.initial_cost =
       evaluateSymForcePgo(result.poses, measurements).total;
   result.final_cost = result.initial_cost;
@@ -170,25 +257,61 @@ GaussNewtonResult optimizeGaussNewton(
 
     const auto solve_start = Clock::now();
 
-    Eigen::SparseQR<SparseMatrix, Eigen::COLAMDOrdering<int>> qr;
-    qr.compute(J);
+    Eigen::Index rank = -1;
+    Eigen::VectorXd delta;
 
-    if (qr.info() != Eigen::Success) {
-      throw std::runtime_error("SparseQR factorization failed.");
+    if (options.linear_solver == GaussNewtonLinearSolver::kSparseQr) {
+      Eigen::SparseQR<SparseMatrix, Eigen::COLAMDOrdering<int>> qr;
+      qr.compute(J);
+
+      if (qr.info() != Eigen::Success) {
+        throw std::runtime_error("SparseQR factorization failed.");
+      }
+
+      rank = qr.rank();
+      delta = qr.solve(-linearization.residual);
+
+      if (qr.info() != Eigen::Success || !vectorIsFinite(delta)) {
+        throw std::runtime_error(
+            "SparseQR solve failed or produced a non-finite step.");
+      }
+    } else if (
+        options.linear_solver == GaussNewtonLinearSolver::kSymmetricLdlt) {
+      const ReducedJacobian reduced =
+          removeTranslationGaugeColumns(J, linearization.Jc.cols());
+
+      SparseMatrix H = reduced.matrix.transpose() * reduced.matrix;
+      H.makeCompressed();
+      const Eigen::VectorXd g =
+          reduced.matrix.transpose() * linearization.residual;
+
+      Eigen::SimplicialLDLT<SparseMatrix> ldlt;
+      ldlt.compute(H);
+
+      if (ldlt.info() != Eigen::Success) {
+        throw std::runtime_error(
+            "SimplicialLDLT factorization failed during Gauss-Newton.");
+      }
+
+      const Eigen::VectorXd reduced_delta = ldlt.solve(-g);
+      if (ldlt.info() != Eigen::Success ||
+          !vectorIsFinite(reduced_delta)) {
+        throw std::runtime_error(
+            "SimplicialLDLT solve failed or produced a non-finite step.");
+      }
+
+      delta = expandReducedDelta(reduced_delta, reduced, J.cols());
+
+      // SimplicialLDLT is not rank revealing.  After a successful solve this
+      // records the dimension of the two-translation-gauge-reduced system.
+      rank = reduced.matrix.cols();
+    } else {
+      throw std::invalid_argument("Unknown Gauss-Newton linear solver.");
     }
-
-    const Eigen::Index rank = qr.rank();
-    const Eigen::VectorXd delta =
-        qr.solve(-linearization.residual);
 
     const auto solve_end = Clock::now();
     const double solve_ms = milliseconds(solve_start, solve_end);
     result.total_solve_time_ms += solve_ms;
-
-    if (qr.info() != Eigen::Success || !vectorIsFinite(delta)) {
-      throw std::runtime_error(
-          "SparseQR solve failed or produced a non-finite step.");
-    }
 
     const double full_step_norm = delta.norm();
 
@@ -271,6 +394,10 @@ GaussNewtonResult optimizeGaussNewton(
 
     result.poses = std::move(accepted_poses);
     result.final_cost = accepted_cost;
+
+    if (options.record_trajectory_history) {
+      result.trajectory_history.push_back(result.poses);
+    }
 
     if (accepted_step_norm <= options.step_tolerance) {
       result.converged = true;

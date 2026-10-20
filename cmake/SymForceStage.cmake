@@ -174,6 +174,35 @@ if(
     )
 
 
+    # End-to-end Gauss-Newton benchmark: SparseQR versus symmetric LDLT.
+    add_executable(
+        benchmark_optimizer_solvers
+        apps/benchmark_optimizer_solvers.cpp
+    )
+
+    target_link_libraries(
+        benchmark_optimizer_solvers
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
+
+    # Export per-iteration QR/LDLT trajectories and optimization traces for
+    # numerical/visual validation.
+    add_executable(
+        export_solver_validation
+        apps/export_solver_validation.cpp
+    )
+
+    target_link_libraries(
+        export_solver_validation
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
+
     # Graph-level reference-vs-SymForce PGO test.
     add_executable(
         test_symforce_pgo_cost

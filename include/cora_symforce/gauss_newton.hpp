@@ -11,6 +11,13 @@
 
 namespace cora_symforce {
 
+enum class GaussNewtonLinearSolver {
+  kSparseQr,
+  kSymmetricLdlt,
+};
+
+const char* gaussNewtonLinearSolverName(GaussNewtonLinearSolver solver);
+
 struct GaussNewtonOptions {
   std::size_t max_iterations = 30;
   double gradient_tolerance = 1e-8;
@@ -18,6 +25,14 @@ struct GaussNewtonOptions {
   double relative_cost_tolerance = 1e-12;
   std::size_t max_backtracking_steps = 12;
   double minimum_step_scale = 1e-6;
+
+  // Keep SparseQR as the default/reference backend.  The symmetric backend
+  // solves the gauge-reduced normal equations with SimplicialLDLT.
+  GaussNewtonLinearSolver linear_solver = GaussNewtonLinearSolver::kSparseQr;
+
+  // Optional instrumentation for visualization/validation. Disabled by default
+  // so normal benchmark runs do not copy full trajectories every iteration.
+  bool record_trajectory_history = false;
 };
 
 struct GaussNewtonIteration {
@@ -36,6 +51,10 @@ struct GaussNewtonResult {
   std::vector<Pose2State> poses;
   std::vector<GaussNewtonIteration> iterations;
 
+  // When record_trajectory_history is enabled, entry 0 is the initial
+  // trajectory and each following entry is one accepted Gauss-Newton state.
+  std::vector<std::vector<Pose2State>> trajectory_history;
+
   double initial_cost = 0.0;
   double final_cost = 0.0;
   bool converged = false;
@@ -45,16 +64,19 @@ struct GaussNewtonResult {
   double total_solve_time_ms = 0.0;
 };
 
-// Full pose-graph Gauss-Newton baseline.
+// Full pose-graph Gauss-Newton optimizer.
 //
 // The graph Jacobian is assembled in the global ordering
 //
 //   [theta_0 ... theta_(n-1),
 //    t_0x t_0y ... t_(n-1)x t_(n-1)y].
 //
-// We solve J * delta ~= -r directly with sparse rank-revealing QR instead of
-// forming/solving the gauge-singular normal equations. No pose is anchored by
-// this baseline solver.
+// kSparseQr solves J * delta ~= -r directly without anchoring a pose.
+//
+// kSymmetricLdlt removes only pose-0 x/y translation increments, forms
+// H = J_r^T J_r and g = J_r^T r, and solves H * delta_r = -g with sparse
+// SimplicialLDLT.  The two removed columns select a translation reference for
+// the exact global-translation nullspace observed in this formulation.
 GaussNewtonResult optimizeGaussNewton(
     const std::vector<Pose2State>& initial_poses,
     const std::vector<RelativePoseMeasurement>& measurements,
