@@ -29,14 +29,15 @@ void writeIterationSummary(
   }
 
   out << std::setprecision(17);
-  out << "iteration,cost,gradient_norm,step_norm,alpha,linearization_ms,"
-         "solve_ms,cumulative_linearization_ms,cumulative_solve_ms\n";
+  out << "iteration,cost,gradient_norm,step_norm,alpha,damping,"
+         "gain_ratio,trial_count,linearization_ms,solve_ms,"
+         "cumulative_linearization_ms,cumulative_solve_ms\n";
 
   double cumulative_linearization = 0.0;
   double cumulative_solve = 0.0;
 
   out << 0 << ',' << result.initial_cost
-      << ",0,0,0,0,0,0,0\n";
+      << ",0,0,0,0,0,0,0,0,0,0\n";
 
   for (const auto& iteration : result.iterations) {
     cumulative_linearization += iteration.linearization_time_ms;
@@ -47,6 +48,9 @@ void writeIterationSummary(
         << iteration.gradient_norm << ','
         << iteration.step_norm << ','
         << iteration.step_scale << ','
+        << iteration.damping << ','
+        << iteration.gain_ratio << ','
+        << iteration.trial_count << ','
         << iteration.linearization_time_ms << ','
         << iteration.solve_time_ms << ','
         << cumulative_linearization << ','
@@ -129,43 +133,135 @@ int main(int argc, char** argv) {
     GaussNewtonOptions ldlt_options = qr_options;
     ldlt_options.linear_solver = GaussNewtonLinearSolver::kSymmetricLdlt;
 
+    LevenbergMarquardtOptions lm_qr_options;
+    lm_qr_options.max_iterations = max_iterations;
+    lm_qr_options.max_trials_per_iteration = 12;
+    lm_qr_options.gradient_tolerance = 1e-8;
+    lm_qr_options.step_tolerance = 1e-10;
+    lm_qr_options.relative_cost_tolerance = 1e-12;
+    lm_qr_options.initial_damping = 1e-3;
+    lm_qr_options.acceptance_threshold = 1e-4;
+    lm_qr_options.linear_solver = GaussNewtonLinearSolver::kSparseQr;
+    lm_qr_options.record_trajectory_history = true;
+
+    LevenbergMarquardtOptions lm_ldlt_options = lm_qr_options;
+    lm_ldlt_options.linear_solver =
+        GaussNewtonLinearSolver::kSymmetricLdlt;
+
+    // All four optimizers start from exactly the same trajectory.
     const GaussNewtonResult qr = optimizeGaussNewton(
         initialization.poses, dataset.measurements, qr_options);
+
     const GaussNewtonResult ldlt = optimizeGaussNewton(
         initialization.poses, dataset.measurements, ldlt_options);
 
-    writeSolverOutputs(output_dir, "qr", qr);
-    writeSolverOutputs(output_dir, "ldlt", ldlt);
+    const GaussNewtonResult lm_qr = optimizeLevenbergMarquardt(
+        initialization.poses, dataset.measurements, lm_qr_options);
+
+    const GaussNewtonResult lm_ldlt = optimizeLevenbergMarquardt(
+        initialization.poses, dataset.measurements, lm_ldlt_options);
+
+    writeSolverOutputs(output_dir, "gn_qr", qr);
+    writeSolverOutputs(output_dir, "gn_ldlt", ldlt);
+    writeSolverOutputs(output_dir, "lm_qr", lm_qr);
+    writeSolverOutputs(output_dir, "lm_ldlt", lm_ldlt);
 
     std::ofstream meta(output_dir / "metadata.txt");
     if (!meta) {
       throw std::runtime_error("Unable to open metadata output.");
     }
+
     meta << std::setprecision(17);
     meta << "dataset=" << dataset_path << '\n';
     meta << "poses=" << initialization.poses.size() << '\n';
     meta << "edges=" << dataset.measurements.size() << '\n';
-    meta << "trajectory_source=" << trajectorySourceName(initialization.source) << '\n';
-    meta << "qr_initial_cost=" << qr.initial_cost << '\n';
-    meta << "qr_final_cost=" << qr.final_cost << '\n';
-    meta << "qr_iterations=" << qr.iterations.size() << '\n';
-    meta << "qr_converged=" << (qr.converged ? 1 : 0) << '\n';
-    meta << "qr_total_solve_ms=" << qr.total_solve_time_ms << '\n';
-    meta << "ldlt_initial_cost=" << ldlt.initial_cost << '\n';
-    meta << "ldlt_final_cost=" << ldlt.final_cost << '\n';
-    meta << "ldlt_iterations=" << ldlt.iterations.size() << '\n';
-    meta << "ldlt_converged=" << (ldlt.converged ? 1 : 0) << '\n';
-    meta << "ldlt_total_solve_ms=" << ldlt.total_solve_time_ms << '\n';
+    meta << "trajectory_source="
+         << trajectorySourceName(initialization.source) << '\n';
+    meta << "max_iterations=" << max_iterations << '\n';
+
+    auto write_meta =
+        [&meta](const std::string& prefix,
+                const GaussNewtonResult& result) {
+          meta << prefix << "_initial_cost="
+               << result.initial_cost << '\n';
+          meta << prefix << "_final_cost="
+               << result.final_cost << '\n';
+          meta << prefix << "_iterations="
+               << result.iterations.size() << '\n';
+          meta << prefix << "_converged="
+               << (result.converged ? 1 : 0) << '\n';
+          meta << prefix << "_termination="
+               << result.termination_reason << '\n';
+          meta << prefix << "_total_linearization_ms="
+               << result.total_linearization_time_ms << '\n';
+          meta << prefix << "_total_solve_ms="
+               << result.total_solve_time_ms << '\n';
+        };
+
+    write_meta("gn_qr", qr);
+    write_meta("gn_ldlt", ldlt);
+    write_meta("lm_qr", lm_qr);
+    write_meta("lm_ldlt", lm_ldlt);
 
     std::cout << std::setprecision(15);
-    std::cout << "Dataset                : " << dataset_path << '\n';
-    std::cout << "Output directory       : " << output_dir << '\n';
-    std::cout << "QR final cost          : " << qr.final_cost << '\n';
-    std::cout << "LDLT final cost        : " << ldlt.final_cost << '\n';
-    std::cout << "QR iterations          : " << qr.iterations.size() << '\n';
-    std::cout << "LDLT iterations        : " << ldlt.iterations.size() << '\n';
-    std::cout << "QR solve total [ms]    : " << qr.total_solve_time_ms << '\n';
-    std::cout << "LDLT solve total [ms]  : " << ldlt.total_solve_time_ms << '\n';
+
+    std::cout << "Dataset                  : "
+              << dataset_path << '\n';
+    std::cout << "Output directory         : "
+              << output_dir << '\n';
+    std::cout << "Trajectory source        : "
+              << trajectorySourceName(initialization.source) << '\n';
+    std::cout << "Poses                    : "
+              << initialization.poses.size() << '\n';
+    std::cout << "Edges                    : "
+              << dataset.measurements.size() << '\n';
+
+    std::cout << "\n===== FINAL COSTS =====\n";
+    std::cout << "GN  SparseQR             : "
+              << qr.final_cost << '\n';
+    std::cout << "GN  LDLT                 : "
+              << ldlt.final_cost << '\n';
+    std::cout << "LM  SparseQR             : "
+              << lm_qr.final_cost << '\n';
+    std::cout << "LM  LDLT                 : "
+              << lm_ldlt.final_cost << '\n';
+
+    std::cout << "\n===== ITERATIONS =====\n";
+    std::cout << "GN  SparseQR             : "
+              << qr.iterations.size() << '\n';
+    std::cout << "GN  LDLT                 : "
+              << ldlt.iterations.size() << '\n';
+    std::cout << "LM  SparseQR             : "
+              << lm_qr.iterations.size() << '\n';
+    std::cout << "LM  LDLT                 : "
+              << lm_ldlt.iterations.size() << '\n';
+
+    std::cout << "\n===== TERMINATION =====\n";
+    std::cout << "GN  SparseQR             : "
+              << qr.termination_reason << '\n';
+    std::cout << "GN  LDLT                 : "
+              << ldlt.termination_reason << '\n';
+    std::cout << "LM  SparseQR             : "
+              << lm_qr.termination_reason << '\n';
+    std::cout << "LM  LDLT                 : "
+              << lm_ldlt.termination_reason << '\n';
+
+    std::cout << "\n===== SOLVE TIME [ms] =====\n";
+    std::cout << "GN  SparseQR             : "
+              << qr.total_solve_time_ms << '\n';
+    std::cout << "GN  LDLT                 : "
+              << ldlt.total_solve_time_ms << '\n';
+    std::cout << "LM  SparseQR             : "
+              << lm_qr.total_solve_time_ms << '\n';
+    std::cout << "LM  LDLT                 : "
+              << lm_ldlt.total_solve_time_ms << '\n';
+
+    const double lm_cost_gap =
+        std::abs(lm_qr.final_cost - lm_ldlt.final_cost);
+
+    std::cout << "\nLM QR/LDLT final cost gap: "
+              << lm_cost_gap << '\n';
+
     std::cout << "Trace export complete.\n";
 
     return EXIT_SUCCESS;

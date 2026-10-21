@@ -45,6 +45,37 @@ struct GaussNewtonIteration {
   Eigen::Index numerical_rank = 0;
   double linearization_time_ms = 0.0;
   double solve_time_ms = 0.0;
+
+  // Trust-region / Levenberg-Marquardt diagnostics.
+  // These remain zero for the original Gauss-Newton implementation.
+  double damping = 0.0;
+  double gain_ratio = 0.0;
+  std::size_t trial_count = 0;
+};
+
+struct LevenbergMarquardtOptions {
+  std::size_t max_iterations = 100;
+  std::size_t max_trials_per_iteration = 12;
+
+  double gradient_tolerance = 1e-8;
+  double step_tolerance = 1e-10;
+  double relative_cost_tolerance = 1e-12;
+
+  // Damping for
+  //
+  //   (J_r^T J_r + lambda I) delta = -J_r^T r
+  //
+  // Both SparseQR and LDLT solve the same gauge-reduced damped model.
+  double initial_damping = 1e-3;
+
+  // A trial is accepted only when the nonlinear objective decreases
+  // consistently with the local quadratic model.
+  double acceptance_threshold = 1e-4;
+
+  GaussNewtonLinearSolver linear_solver =
+      GaussNewtonLinearSolver::kSymmetricLdlt;
+
+  bool record_trajectory_history = false;
 };
 
 struct GaussNewtonResult {
@@ -81,5 +112,10 @@ GaussNewtonResult optimizeGaussNewton(
     const std::vector<Pose2State>& initial_poses,
     const std::vector<RelativePoseMeasurement>& measurements,
     const GaussNewtonOptions& options = {});
+
+GaussNewtonResult optimizeLevenbergMarquardt(
+    const std::vector<Pose2State>& initial_poses,
+    const std::vector<RelativePoseMeasurement>& measurements,
+    const LevenbergMarquardtOptions& options = {});
 
 }  // namespace cora_symforce

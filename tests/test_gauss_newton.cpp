@@ -147,6 +147,63 @@ int main() {
   passed &= validateResult("SparseQR", initial_cost, qr_result);
   passed &= validateResult("Symmetric LDLT", initial_cost, ldlt_result);
 
+  LevenbergMarquardtOptions lm_qr_options;
+  lm_qr_options.max_iterations = 50;
+  lm_qr_options.max_trials_per_iteration = 12;
+  lm_qr_options.gradient_tolerance = 1e-10;
+  lm_qr_options.step_tolerance = 1e-12;
+  lm_qr_options.relative_cost_tolerance = 1e-14;
+  lm_qr_options.initial_damping = 1e-3;
+  lm_qr_options.acceptance_threshold = 1e-4;
+  lm_qr_options.linear_solver =
+      GaussNewtonLinearSolver::kSparseQr;
+  lm_qr_options.record_trajectory_history = true;
+
+  LevenbergMarquardtOptions lm_ldlt_options =
+      lm_qr_options;
+
+  lm_ldlt_options.linear_solver =
+      GaussNewtonLinearSolver::kSymmetricLdlt;
+
+  const GaussNewtonResult lm_qr_result =
+      optimizeLevenbergMarquardt(
+          problem.initial_guess,
+          problem.measurements,
+          lm_qr_options);
+
+  const GaussNewtonResult lm_ldlt_result =
+      optimizeLevenbergMarquardt(
+          problem.initial_guess,
+          problem.measurements,
+          lm_ldlt_options);
+
+  passed &= validateResult(
+      "LM SparseQR",
+      initial_cost,
+      lm_qr_result);
+
+  passed &= validateResult(
+      "LM Symmetric LDLT",
+      initial_cost,
+      lm_ldlt_result);
+
+  const double lm_final_cost_gap =
+      std::abs(
+          lm_qr_result.final_cost -
+          lm_ldlt_result.final_cost);
+
+  std::cout
+      << "\nFinal cost gap LM QR vs LDLT : "
+      << lm_final_cost_gap
+      << '\n';
+
+  if (!std::isfinite(lm_final_cost_gap) ||
+      lm_final_cost_gap > 1e-10) {
+    std::cerr
+        << "FAILED: LM QR and LDLT final toy costs disagree.\n";
+    passed = false;
+  }
+
   const double final_cost_gap =
       std::abs(qr_result.final_cost - ldlt_result.final_cost);
   std::cout << "\nFinal cost gap QR vs LDLT : " << final_cost_gap << '\n';
@@ -160,6 +217,6 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  std::cout << "\nGauss-Newton QR/LDLT optimization PASSED.\n";
+  std::cout << "\nGauss-Newton + LM QR/LDLT optimization PASSED.\n";
   return EXIT_SUCCESS;
 }
