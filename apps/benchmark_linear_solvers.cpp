@@ -78,7 +78,16 @@ int main(int argc, char** argv) {
     std::cout << "H nonzeros                        : "
               << comparison.normal_nonzeros << '\n';
     std::cout << "H symmetry max error              : "
-              << comparison.normal_symmetry_error << "\n\n";
+              << comparison.normal_symmetry_error << '\n';
+
+    std::cout << "Schur rotation columns            : "
+              << comparison.schur_rotation_columns << '\n';
+
+    std::cout << "Schur translation columns         : "
+              << comparison.schur_translation_columns << '\n';
+
+    std::cout << "Schur symmetry max error          : "
+              << comparison.schur_symmetry_error << "\n\n";
 
     std::cout << "SparseQR factor median [ms]        : "
               << comparison.qr_factorization_time_ms << '\n';
@@ -111,8 +120,23 @@ int main(int argc, char** argv) {
               << comparison.linearized_residual_norm_gap << '\n';
     std::cout << "||J(dx_qr - dx_ldlt)||             : "
               << comparison.prediction_difference_norm << '\n';
-    std::cout << "Relative ||H dx + g||              : "
+    std::cout << "Relative ||H dx_ldlt + g||         : "
               << comparison.ldlt_relative_normal_residual << '\n';
+
+    std::cout << "||J dx_schur + r||                 : "
+              << comparison.schur_linearized_residual_norm << '\n';
+
+    std::cout << "Schur vs LDLT residual norm gap    : "
+              << std::abs(
+                     comparison.schur_linearized_residual_norm -
+                     comparison.ldlt_linearized_residual_norm)
+              << '\n';
+
+    std::cout << "||J(dx_ldlt - dx_schur)||          : "
+              << comparison.schur_prediction_difference_norm << '\n';
+
+    std::cout << "Relative ||H dx_schur + g||        : "
+              << comparison.schur_relative_normal_residual << '\n';
 
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {

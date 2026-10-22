@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Cholesky>
 #include <Eigen/OrderingMethods>
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseCore>
@@ -136,6 +137,37 @@ ReducedJacobian removeTranslationGaugeColumns(
   reduced.matrix.resize(J.rows(), J.cols() - 2);
   reduced.matrix.setFromTriplets(triplets.begin(), triplets.end());
   reduced.matrix.makeCompressed();
+  return reduced;
+}
+
+SparseMatrix removeFirstPoseTranslationColumns(
+    const SparseMatrix& Jf) {
+  if (Jf.cols() < 2) {
+    throw std::invalid_argument(
+        "Translation Jacobian must contain at least one pose.");
+  }
+
+  std::vector<Triplet> triplets;
+  triplets.reserve(static_cast<std::size_t>(Jf.nonZeros()));
+
+  for (Eigen::Index outer = 0; outer < Jf.outerSize(); ++outer) {
+    for (SparseMatrix::InnerIterator it(Jf, outer); it; ++it) {
+      // Pose-0 translation columns are Jf columns 0 and 1.
+      if (it.col() < 2) {
+        continue;
+      }
+
+      triplets.emplace_back(
+          it.row(),
+          it.col() - 2,
+          it.value());
+    }
+  }
+
+  SparseMatrix reduced(Jf.rows(), Jf.cols() - 2);
+  reduced.setFromTriplets(triplets.begin(), triplets.end());
+  reduced.makeCompressed();
+
   return reduced;
 }
 
@@ -328,6 +360,184 @@ LinearSolverComparison compareLinearSolvers(
   const Eigen::VectorXd normal_residual = H * reduced_delta + g;
   result.ldlt_relative_normal_residual =
       normal_residual.norm() / std::max(1.0, g.norm());
+
+  // ============================================================
+  // Explicit Schur-complement reference solve
+  //
+  // Reduced variable ordering:
+  //
+  //   [delta_theta,
+  //    delta_t_without_pose0]
+  //
+  // Full reduced normal equations:
+  //
+  //   [Hcc Hcf] [dc] = -[gc]
+  //   [Hfc Hff] [df]    [gf]
+  //
+  // Eliminate translations:
+  //
+  //   S dc = -gc + Hcf Hff^{-1} gf
+  //
+  // with
+  //
+  //   S = Hcc - Hcf Hff^{-1} Hfc.
+  //
+  // No explicit Hff inverse is ever formed.
+  // ============================================================
+
+  const SparseMatrix reduced_Jf =
+      removeFirstPoseTranslationColumns(linearization.Jf);
+
+  const Eigen::Index rotation_columns =
+      linearization.Jc.cols();
+
+  const Eigen::Index translation_columns =
+      reduced_Jf.cols();
+
+  result.schur_rotation_columns =
+      rotation_columns;
+
+  result.schur_translation_columns =
+      translation_columns;
+
+  const SparseMatrix Hcc =
+      linearization.Jc.transpose() * linearization.Jc;
+
+  const SparseMatrix Hcf =
+      linearization.Jc.transpose() * reduced_Jf;
+
+  const SparseMatrix Hff =
+      reduced_Jf.transpose() * reduced_Jf;
+
+  const Eigen::VectorXd gc =
+      linearization.Jc.transpose() *
+      linearization.residual;
+
+  const Eigen::VectorXd gf =
+      reduced_Jf.transpose() *
+      linearization.residual;
+
+  // Hff becomes positive definite after the global translation
+  // gauge is fixed for a connected pose graph.
+  Eigen::SimplicialLDLT<SparseMatrix> translation_ldlt;
+  translation_ldlt.compute(Hff);
+
+  if (translation_ldlt.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "Schur Hff factorization failed after translation gauge removal.");
+  }
+
+  // Solve Hff * X = Hfc without forming Hff^{-1}.
+  const Eigen::MatrixXd Hfc_dense =
+      Eigen::MatrixXd(Hcf.transpose());
+
+  const Eigen::MatrixXd X =
+      translation_ldlt.solve(Hfc_dense);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !X.array().isFinite().all()) {
+    throw std::runtime_error(
+        "Schur Hff multi-RHS solve failed.");
+  }
+
+  // Solve Hff * y = gf.
+  const Eigen::VectorXd y =
+      translation_ldlt.solve(gf);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(y)) {
+    throw std::runtime_error(
+        "Schur Hff gradient solve failed.");
+  }
+
+  const Eigen::MatrixXd Hcc_dense =
+      Eigen::MatrixXd(Hcc);
+
+  const Eigen::MatrixXd Hcf_dense =
+      Eigen::MatrixXd(Hcf);
+
+  Eigen::MatrixXd S =
+      Hcc_dense -
+      Hcf_dense * X;
+
+  // Numerical roundoff can leave tiny asymmetry even though the
+  // mathematical Schur complement is symmetric.
+  result.schur_symmetry_error =
+      (S - S.transpose()).cwiseAbs().maxCoeff();
+
+  S = 0.5 * (S + S.transpose());
+
+  const Eigen::VectorXd schur_rhs =
+      -gc +
+      Hcf_dense * y;
+
+  Eigen::LDLT<Eigen::MatrixXd> schur_ldlt;
+  schur_ldlt.compute(S);
+
+  if (schur_ldlt.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "Dense Schur complement LDLT factorization failed.");
+  }
+
+  const Eigen::VectorXd delta_c =
+      schur_ldlt.solve(schur_rhs);
+
+  if (schur_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(delta_c)) {
+    throw std::runtime_error(
+        "Dense Schur complement solve failed.");
+  }
+
+  // Back-substitution:
+  //
+  // Hff df = -(gf + Hfc dc)
+  const Eigen::VectorXd delta_f =
+      translation_ldlt.solve(
+          -gf -
+          Hcf.transpose() * delta_c);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(delta_f)) {
+    throw std::runtime_error(
+        "Schur translation back-substitution failed.");
+  }
+
+  Eigen::VectorXd schur_reduced_delta(
+      rotation_columns + translation_columns);
+
+  schur_reduced_delta.head(rotation_columns) =
+      delta_c;
+
+  schur_reduced_delta.tail(translation_columns) =
+      delta_f;
+
+  if (schur_reduced_delta.size() != reduced_delta.size()) {
+    throw std::runtime_error(
+        "Schur reduced state dimension does not match full LDLT state.");
+  }
+
+  const Eigen::VectorXd schur_delta =
+      expandReducedDelta(
+          schur_reduced_delta,
+          reduced,
+          J.cols());
+
+  const Eigen::VectorXd schur_prediction =
+      J * schur_delta +
+      linearization.residual;
+
+  result.schur_linearized_residual_norm =
+      schur_prediction.norm();
+
+  result.schur_prediction_difference_norm =
+      (J * (ldlt_delta - schur_delta)).norm();
+
+  const Eigen::VectorXd schur_normal_residual =
+      H * schur_reduced_delta + g;
+
+  result.schur_relative_normal_residual =
+      schur_normal_residual.norm() /
+      std::max(1.0, g.norm());
 
   return result;
 }

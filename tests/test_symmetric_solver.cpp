@@ -59,7 +59,13 @@ int main() {
   std::cout << "J nonzeros                    : "
             << comparison.jacobian_nonzeros << '\n';
   std::cout << "H nonzeros                    : "
-            << comparison.normal_nonzeros << "\n\n";
+            << comparison.normal_nonzeros << '\n';
+
+  std::cout << "Schur rotation columns        : "
+            << comparison.schur_rotation_columns << '\n';
+
+  std::cout << "Schur translation columns     : "
+            << comparison.schur_translation_columns << "\n\n";
 
   bool passed = true;
 
@@ -83,11 +89,57 @@ int main() {
       1e-9,
       "LDLT relative normal residual");
 
+  passed &= checkNear(
+      comparison.schur_symmetry_error,
+      1e-10,
+      "Schur symmetry max error");
+
+  passed &= checkNear(
+      std::abs(
+          comparison.schur_linearized_residual_norm -
+          comparison.ldlt_linearized_residual_norm),
+      1e-9,
+      "Schur vs LDLT residual-norm gap");
+
+  passed &= checkNear(
+      comparison.schur_prediction_difference_norm,
+      1e-8,
+      "LDLT vs Schur prediction difference");
+
+  passed &= checkNear(
+      comparison.schur_relative_normal_residual,
+      1e-9,
+      "Schur relative normal residual");
+
   if (comparison.reduced_state_columns !=
       comparison.state_columns - 2) {
     std::cerr
         << "FAILED: symmetric system did not remove exactly two "
            "translation gauge columns.\n";
+    passed = false;
+  }
+
+  if (comparison.schur_rotation_columns !=
+      linearization.Jc.cols()) {
+    std::cerr
+        << "FAILED: Schur rotation dimension does not match Jc.\n";
+    passed = false;
+  }
+
+  if (comparison.schur_translation_columns !=
+      linearization.Jf.cols() - 2) {
+    std::cerr
+        << "FAILED: Schur translation dimension did not remove exactly "
+           "the pose-0 x/y gauge coordinates.\n";
+    passed = false;
+  }
+
+  if (comparison.schur_rotation_columns +
+          comparison.schur_translation_columns !=
+      comparison.reduced_state_columns) {
+    std::cerr
+        << "FAILED: Schur block dimensions do not reconstruct the "
+           "gauge-reduced state dimension.\n";
     passed = false;
   }
 
@@ -104,6 +156,6 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  std::cout << "\nSparseQR vs symmetric LDLT checks PASSED.\n";
+  std::cout << "\nSparseQR / LDLT / Schur checks PASSED.\n";
   return EXIT_SUCCESS;
 }

@@ -47,6 +47,23 @@ struct LinearSolverComparison {
 
   // Relative residual of H * delta + g = 0 for the reduced symmetric system.
   double ldlt_relative_normal_residual = 0.0;
+
+  // Explicit Schur-complement reference solve.  Rotations are retained,
+  // while pose-0 x/y translations are fixed and the remaining translations
+  // are eliminated through Hff.
+  Eigen::Index schur_rotation_columns = 0;
+  Eigen::Index schur_translation_columns = 0;
+
+  double schur_symmetry_error = 0.0;
+  double schur_linearized_residual_norm = 0.0;
+
+  // Compare Schur and full LDLT in residual space because gauge-equivalent
+  // state increments need not be compared component-wise.
+  double schur_prediction_difference_norm = 0.0;
+
+  // Relative residual of the same gauge-reduced full normal equations,
+  // evaluated using the Schur-complement solution.
+  double schur_relative_normal_residual = 0.0;
 };
 
 // Compare two linear solvers on exactly one already-computed graph
