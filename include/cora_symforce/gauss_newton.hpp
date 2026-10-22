@@ -14,6 +14,7 @@ namespace cora_symforce {
 enum class GaussNewtonLinearSolver {
   kSparseQr,
   kSymmetricLdlt,
+  kSchur,
 };
 
 const char* gaussNewtonLinearSolverName(GaussNewtonLinearSolver solver);

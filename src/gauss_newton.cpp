@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Cholesky>
 #include <Eigen/OrderingMethods>
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseCore>
@@ -178,6 +179,193 @@ SparseMatrix buildDampedAugmentedJacobian(
   return augmented;
 }
 
+SparseMatrix removeFirstPoseTranslationColumns(
+    const SparseMatrix& Jf) {
+  if (Jf.cols() < 2) {
+    throw std::invalid_argument(
+        "Translation Jacobian must contain at least one pose.");
+  }
+
+  std::vector<Triplet> triplets;
+  triplets.reserve(static_cast<std::size_t>(Jf.nonZeros()));
+
+  for (Eigen::Index outer = 0; outer < Jf.outerSize(); ++outer) {
+    for (SparseMatrix::InnerIterator it(Jf, outer); it; ++it) {
+      // Pose-0 translation increments are the two gauge coordinates.
+      if (it.col() < 2) {
+        continue;
+      }
+
+      triplets.emplace_back(
+          it.row(),
+          it.col() - 2,
+          it.value());
+    }
+  }
+
+  SparseMatrix reduced(Jf.rows(), Jf.cols() - 2);
+  reduced.setFromTriplets(triplets.begin(), triplets.end());
+  reduced.makeCompressed();
+  return reduced;
+}
+
+
+void addDiagonalDamping(
+    SparseMatrix& matrix,
+    const double damping) {
+  if (!(damping >= 0.0) || !std::isfinite(damping)) {
+    throw std::invalid_argument(
+        "Schur damping must be finite and non-negative.");
+  }
+
+  if (damping == 0.0) {
+    return;
+  }
+
+  for (Eigen::Index i = 0; i < matrix.rows(); ++i) {
+    matrix.coeffRef(i, i) += damping;
+  }
+
+  matrix.makeCompressed();
+}
+
+
+Eigen::VectorXd solveSchurReducedStep(
+    const GraphLinearization& linearization,
+    const double damping) {
+  // State ordering after fixing pose-0 translation:
+  //
+  //   [theta_0 ... theta_(n-1),
+  //    t_1x t_1y ... t_(n-1)x t_(n-1)y]
+  //
+  // The damping is applied BEFORE elimination so this solves exactly
+  //
+  //   (J_r^T J_r + lambda I) delta = -J_r^T r.
+  //
+  // lambda = 0 gives the ordinary Gauss-Newton Schur step.
+
+  const SparseMatrix reduced_Jf =
+      removeFirstPoseTranslationColumns(
+          linearization.Jf);
+
+  SparseMatrix Hcc =
+      linearization.Jc.transpose() *
+      linearization.Jc;
+
+  const SparseMatrix Hcf =
+      linearization.Jc.transpose() *
+      reduced_Jf;
+
+  SparseMatrix Hff =
+      reduced_Jf.transpose() *
+      reduced_Jf;
+
+  Hcc.makeCompressed();
+  Hff.makeCompressed();
+
+  addDiagonalDamping(Hcc, damping);
+  addDiagonalDamping(Hff, damping);
+
+  const Eigen::VectorXd gc =
+      linearization.Jc.transpose() *
+      linearization.residual;
+
+  const Eigen::VectorXd gf =
+      reduced_Jf.transpose() *
+      linearization.residual;
+
+  Eigen::SimplicialLDLT<SparseMatrix> translation_ldlt;
+  translation_ldlt.compute(Hff);
+
+  if (translation_ldlt.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "Schur Hff factorization failed.");
+  }
+
+  // X = Hff^{-1} Hfc, computed by solves rather than inversion.
+  const Eigen::MatrixXd Hfc =
+      Eigen::MatrixXd(Hcf.transpose());
+
+  const Eigen::MatrixXd X =
+      translation_ldlt.solve(Hfc);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !X.array().isFinite().all()) {
+    throw std::runtime_error(
+        "Schur Hff multi-RHS solve failed.");
+  }
+
+  // y = Hff^{-1} gf.
+  const Eigen::VectorXd y =
+      translation_ldlt.solve(gf);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(y)) {
+    throw std::runtime_error(
+        "Schur Hff gradient solve failed.");
+  }
+
+  const Eigen::MatrixXd Hcc_dense =
+      Eigen::MatrixXd(Hcc);
+
+  const Eigen::MatrixXd Hcf_dense =
+      Eigen::MatrixXd(Hcf);
+
+  Eigen::MatrixXd S =
+      Hcc_dense -
+      Hcf_dense * X;
+
+  // Remove only roundoff-level asymmetry.
+  S = 0.5 * (S + S.transpose());
+
+  const Eigen::VectorXd rhs =
+      -gc +
+      Hcf_dense * y;
+
+  Eigen::LDLT<Eigen::MatrixXd> schur_ldlt;
+  schur_ldlt.compute(S);
+
+  if (schur_ldlt.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "Schur reduced LDLT factorization failed.");
+  }
+
+  const Eigen::VectorXd delta_c =
+      schur_ldlt.solve(rhs);
+
+  if (schur_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(delta_c)) {
+    throw std::runtime_error(
+        "Schur reduced rotation solve failed.");
+  }
+
+  // Back-substitute translations:
+  //
+  // Hff df = -(gf + Hfc dc).
+  const Eigen::VectorXd delta_f =
+      translation_ldlt.solve(
+          -gf -
+          Hcf.transpose() * delta_c);
+
+  if (translation_ldlt.info() != Eigen::Success ||
+      !vectorIsFinite(delta_f)) {
+    throw std::runtime_error(
+        "Schur translation back-substitution failed.");
+  }
+
+  Eigen::VectorXd reduced_delta(
+      delta_c.size() + delta_f.size());
+
+  reduced_delta.head(delta_c.size()) =
+      delta_c;
+
+  reduced_delta.tail(delta_f.size()) =
+      delta_f;
+
+  return reduced_delta;
+}
+
+
 std::vector<Pose2State> applyIncrement(
     const std::vector<Pose2State>& poses,
     const Eigen::VectorXd& delta,
@@ -215,6 +403,8 @@ const char* gaussNewtonLinearSolverName(const GaussNewtonLinearSolver solver) {
       return "sparse_qr";
     case GaussNewtonLinearSolver::kSymmetricLdlt:
       return "symmetric_ldlt";
+    case GaussNewtonLinearSolver::kSchur:
+      return "schur";
   }
   return "unknown";
 }
@@ -336,6 +526,30 @@ GaussNewtonResult optimizeGaussNewton(
 
       // SimplicialLDLT is not rank revealing.  After a successful solve this
       // records the dimension of the two-translation-gauge-reduced system.
+      rank = reduced.matrix.cols();
+    } else if (
+        options.linear_solver == GaussNewtonLinearSolver::kSchur) {
+      const ReducedJacobian reduced =
+          removeTranslationGaugeColumns(
+              J,
+              linearization.Jc.cols());
+
+      const Eigen::VectorXd reduced_delta =
+          solveSchurReducedStep(
+              linearization,
+              0.0);
+
+      if (reduced_delta.size() != reduced.matrix.cols()) {
+        throw std::runtime_error(
+            "Schur Gauss-Newton step has incorrect dimension.");
+      }
+
+      delta =
+          expandReducedDelta(
+              reduced_delta,
+              reduced,
+              J.cols());
+
       rank = reduced.matrix.cols();
     } else {
       throw std::invalid_argument("Unknown Gauss-Newton linear solver.");
@@ -682,6 +896,22 @@ GaussNewtonResult optimizeLevenbergMarquardt(
             !vectorIsFinite(reduced_delta)) {
           throw std::runtime_error(
               "SimplicialLDLT LM solve failed or produced a non-finite step.");
+        }
+
+        rank = Jr.cols();
+
+      } else if (
+          options.linear_solver ==
+          GaussNewtonLinearSolver::kSchur) {
+        reduced_delta =
+            solveSchurReducedStep(
+                linearization,
+                damping);
+
+        if (reduced_delta.size() != Jr.cols() ||
+            !vectorIsFinite(reduced_delta)) {
+          throw std::runtime_error(
+              "Schur LM solve produced an invalid step.");
         }
 
         rank = Jr.cols();

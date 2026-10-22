@@ -129,6 +129,9 @@ int main() {
   GaussNewtonOptions ldlt_options = qr_options;
   ldlt_options.linear_solver = GaussNewtonLinearSolver::kSymmetricLdlt;
 
+  GaussNewtonOptions schur_options = qr_options;
+  schur_options.linear_solver = GaussNewtonLinearSolver::kSchur;
+
   const GaussNewtonResult qr_result =
       optimizeGaussNewton(
           problem.initial_guess,
@@ -141,11 +144,18 @@ int main() {
           problem.measurements,
           ldlt_options);
 
+  const GaussNewtonResult schur_result =
+      optimizeGaussNewton(
+          problem.initial_guess,
+          problem.measurements,
+          schur_options);
+
   std::cout << std::setprecision(15);
 
   bool passed = true;
   passed &= validateResult("SparseQR", initial_cost, qr_result);
   passed &= validateResult("Symmetric LDLT", initial_cost, ldlt_result);
+  passed &= validateResult("Schur", initial_cost, schur_result);
 
   LevenbergMarquardtOptions lm_qr_options;
   lm_qr_options.max_iterations = 50;
@@ -165,6 +175,12 @@ int main() {
   lm_ldlt_options.linear_solver =
       GaussNewtonLinearSolver::kSymmetricLdlt;
 
+  LevenbergMarquardtOptions lm_schur_options =
+      lm_qr_options;
+
+  lm_schur_options.linear_solver =
+      GaussNewtonLinearSolver::kSchur;
+
   const GaussNewtonResult lm_qr_result =
       optimizeLevenbergMarquardt(
           problem.initial_guess,
@@ -177,6 +193,12 @@ int main() {
           problem.measurements,
           lm_ldlt_options);
 
+  const GaussNewtonResult lm_schur_result =
+      optimizeLevenbergMarquardt(
+          problem.initial_guess,
+          problem.measurements,
+          lm_schur_options);
+
   passed &= validateResult(
       "LM SparseQR",
       initial_cost,
@@ -186,6 +208,11 @@ int main() {
       "LM Symmetric LDLT",
       initial_cost,
       lm_ldlt_result);
+
+  passed &= validateResult(
+      "LM Schur",
+      initial_cost,
+      lm_schur_result);
 
   const double lm_final_cost_gap =
       std::abs(
@@ -204,6 +231,40 @@ int main() {
     passed = false;
   }
 
+  const double lm_schur_cost_gap =
+      std::abs(
+          lm_ldlt_result.final_cost -
+          lm_schur_result.final_cost);
+
+  std::cout
+      << "\nFinal cost gap LM LDLT vs Schur : "
+      << lm_schur_cost_gap
+      << '\n';
+
+  if (!std::isfinite(lm_schur_cost_gap) ||
+      lm_schur_cost_gap > 1e-10) {
+    std::cerr
+        << "FAILED: LM LDLT and Schur final toy costs disagree.\n";
+    passed = false;
+  }
+
+  const double gn_schur_cost_gap =
+      std::abs(
+          ldlt_result.final_cost -
+          schur_result.final_cost);
+
+  std::cout
+      << "Final cost gap GN LDLT vs Schur : "
+      << gn_schur_cost_gap
+      << '\n';
+
+  if (!std::isfinite(gn_schur_cost_gap) ||
+      gn_schur_cost_gap > 1e-10) {
+    std::cerr
+        << "FAILED: GN LDLT and Schur final toy costs disagree.\n";
+    passed = false;
+  }
+
   const double final_cost_gap =
       std::abs(qr_result.final_cost - ldlt_result.final_cost);
   std::cout << "\nFinal cost gap QR vs LDLT : " << final_cost_gap << '\n';
@@ -217,6 +278,6 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  std::cout << "\nGauss-Newton + LM QR/LDLT optimization PASSED.\n";
+  std::cout << "\nGauss-Newton + LM QR/LDLT/Schur optimization PASSED.\n";
   return EXIT_SUCCESS;
 }

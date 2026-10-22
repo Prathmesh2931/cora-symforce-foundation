@@ -148,6 +148,10 @@ int main(int argc, char** argv) {
     lm_ldlt_options.linear_solver =
         GaussNewtonLinearSolver::kSymmetricLdlt;
 
+    LevenbergMarquardtOptions lm_schur_options = lm_qr_options;
+    lm_schur_options.linear_solver =
+        GaussNewtonLinearSolver::kSchur;
+
     // All four optimizers start from exactly the same trajectory.
     const GaussNewtonResult qr = optimizeGaussNewton(
         initialization.poses, dataset.measurements, qr_options);
@@ -161,10 +165,14 @@ int main(int argc, char** argv) {
     const GaussNewtonResult lm_ldlt = optimizeLevenbergMarquardt(
         initialization.poses, dataset.measurements, lm_ldlt_options);
 
+    const GaussNewtonResult lm_schur = optimizeLevenbergMarquardt(
+        initialization.poses, dataset.measurements, lm_schur_options);
+
     writeSolverOutputs(output_dir, "gn_qr", qr);
     writeSolverOutputs(output_dir, "gn_ldlt", ldlt);
     writeSolverOutputs(output_dir, "lm_qr", lm_qr);
     writeSolverOutputs(output_dir, "lm_ldlt", lm_ldlt);
+    writeSolverOutputs(output_dir, "lm_schur", lm_schur);
 
     std::ofstream meta(output_dir / "metadata.txt");
     if (!meta) {
@@ -202,6 +210,7 @@ int main(int argc, char** argv) {
     write_meta("gn_ldlt", ldlt);
     write_meta("lm_qr", lm_qr);
     write_meta("lm_ldlt", lm_ldlt);
+    write_meta("lm_schur", lm_schur);
 
     std::cout << std::setprecision(15);
 
@@ -225,6 +234,8 @@ int main(int argc, char** argv) {
               << lm_qr.final_cost << '\n';
     std::cout << "LM  LDLT                 : "
               << lm_ldlt.final_cost << '\n';
+    std::cout << "LM  Schur                : "
+              << lm_schur.final_cost << '\n';
 
     std::cout << "\n===== ITERATIONS =====\n";
     std::cout << "GN  SparseQR             : "
@@ -235,6 +246,8 @@ int main(int argc, char** argv) {
               << lm_qr.iterations.size() << '\n';
     std::cout << "LM  LDLT                 : "
               << lm_ldlt.iterations.size() << '\n';
+    std::cout << "LM  Schur                : "
+              << lm_schur.iterations.size() << '\n';
 
     std::cout << "\n===== TERMINATION =====\n";
     std::cout << "GN  SparseQR             : "
@@ -245,6 +258,8 @@ int main(int argc, char** argv) {
               << lm_qr.termination_reason << '\n';
     std::cout << "LM  LDLT                 : "
               << lm_ldlt.termination_reason << '\n';
+    std::cout << "LM  Schur                : "
+              << lm_schur.termination_reason << '\n';
 
     std::cout << "\n===== SOLVE TIME [ms] =====\n";
     std::cout << "GN  SparseQR             : "
@@ -255,12 +270,22 @@ int main(int argc, char** argv) {
               << lm_qr.total_solve_time_ms << '\n';
     std::cout << "LM  LDLT                 : "
               << lm_ldlt.total_solve_time_ms << '\n';
+    std::cout << "LM  Schur                : "
+              << lm_schur.total_solve_time_ms << '\n';
 
     const double lm_cost_gap =
         std::abs(lm_qr.final_cost - lm_ldlt.final_cost);
 
     std::cout << "\nLM QR/LDLT final cost gap: "
               << lm_cost_gap << '\n';
+
+    const double lm_schur_cost_gap =
+        std::abs(
+            lm_ldlt.final_cost -
+            lm_schur.final_cost);
+
+    std::cout << "LM LDLT/Schur final cost gap: "
+              << lm_schur_cost_gap << '\n';
 
     std::cout << "Trace export complete.\n";
 
