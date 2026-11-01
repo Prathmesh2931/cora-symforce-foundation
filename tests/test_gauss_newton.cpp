@@ -21,6 +21,30 @@ bool finitePoses(const std::vector<cora_symforce::Pose2State>& poses) {
   return true;
 }
 
+
+double maxPoseDifference(
+    const std::vector<cora_symforce::Pose2State>& lhs,
+    const std::vector<cora_symforce::Pose2State>& rhs) {
+
+  if (lhs.size() != rhs.size()) {
+    return 1e300;
+  }
+
+  double maximum = 0.0;
+
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    maximum = std::max(
+        maximum,
+        (lhs[i].R - rhs[i].R).norm());
+
+    maximum = std::max(
+        maximum,
+        (lhs[i].t - rhs[i].t).norm());
+  }
+
+  return maximum;
+}
+
 bool validateResult(
     const char* label,
     const double initial_cost,
@@ -181,6 +205,17 @@ int main() {
   lm_schur_options.linear_solver =
       GaussNewtonLinearSolver::kSchur;
 
+  // Matrix-free Schur-PCG LM configuration.
+  LevenbergMarquardtOptions lm_pcg_options =
+      lm_qr_options;
+
+  lm_pcg_options.linear_solver =
+      GaussNewtonLinearSolver::kSchurPcg;
+
+  lm_pcg_options.schur_pcg.max_iterations = 1000;
+  lm_pcg_options.schur_pcg.relative_tolerance = 1e-12;
+  lm_pcg_options.schur_pcg.absolute_tolerance = 1e-14;
+
   const GaussNewtonResult lm_qr_result =
       optimizeLevenbergMarquardt(
           problem.initial_guess,
@@ -199,6 +234,12 @@ int main() {
           problem.measurements,
           lm_schur_options);
 
+  const GaussNewtonResult lm_pcg_result =
+      optimizeLevenbergMarquardt(
+          problem.initial_guess,
+          problem.measurements,
+          lm_pcg_options);
+
   passed &= validateResult(
       "LM SparseQR",
       initial_cost,
@@ -213,6 +254,11 @@ int main() {
       "LM Schur",
       initial_cost,
       lm_schur_result);
+
+  passed &= validateResult(
+      "LM Schur PCG",
+      initial_cost,
+      lm_pcg_result);
 
   const double lm_final_cost_gap =
       std::abs(
@@ -248,6 +294,72 @@ int main() {
     passed = false;
   }
 
+  const double lm_pcg_cost_gap =
+      std::abs(
+          lm_ldlt_result.final_cost -
+          lm_pcg_result.final_cost);
+
+  const double lm_pcg_pose_gap =
+      maxPoseDifference(
+          lm_ldlt_result.poses,
+          lm_pcg_result.poses);
+
+  std::size_t total_pcg_iterations = 0;
+  double maximum_pcg_residual = 0.0;
+
+  bool pcg_diagnostics_finite = true;
+
+  for (const auto& iteration : lm_pcg_result.iterations) {
+    total_pcg_iterations += iteration.pcg_iterations;
+
+    if (!std::isfinite(iteration.pcg_relative_residual) ||
+        iteration.pcg_relative_residual < 0.0) {
+      pcg_diagnostics_finite = false;
+    }
+
+    maximum_pcg_residual = std::max(
+        maximum_pcg_residual,
+        iteration.pcg_relative_residual);
+  }
+
+  std::cout
+      << "\nLM LDLT vs PCG final cost gap : "
+      << lm_pcg_cost_gap
+      << "\nLM LDLT vs PCG pose gap      : "
+      << lm_pcg_pose_gap
+      << "\nTotal PCG iterations         : "
+      << total_pcg_iterations
+      << "\nMaximum reported PCG residual: "
+      << maximum_pcg_residual
+      << '\n';
+
+  if (!std::isfinite(lm_pcg_cost_gap) ||
+      lm_pcg_cost_gap > 1e-10) {
+    std::cerr
+        << "FAILED: LM LDLT and PCG final costs disagree.\n";
+    passed = false;
+  }
+
+  if (!std::isfinite(lm_pcg_pose_gap) ||
+      lm_pcg_pose_gap > 1e-7) {
+    std::cerr
+        << "FAILED: LM LDLT and PCG final poses disagree.\n";
+    passed = false;
+  }
+
+  if (total_pcg_iterations == 0) {
+    std::cerr
+        << "FAILED: LM PCG did not report any PCG iterations.\n";
+    passed = false;
+  }
+
+  if (!pcg_diagnostics_finite ||
+      maximum_pcg_residual > 1e-5) {
+    std::cerr
+        << "FAILED: LM PCG diagnostics are invalid.\n";
+    passed = false;
+  }
+
   const double gn_schur_cost_gap =
       std::abs(
           ldlt_result.final_cost -
@@ -278,6 +390,6 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  std::cout << "\nGauss-Newton + LM QR/LDLT/Schur optimization PASSED.\n";
+  std::cout << "\nGauss-Newton + LM QR/LDLT/Schur/Schur-PCG optimization PASSED.\n";
   return EXIT_SUCCESS;
 }

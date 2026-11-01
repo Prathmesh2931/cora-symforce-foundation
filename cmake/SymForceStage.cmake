@@ -28,6 +28,7 @@ if(
             src/graph_linearization.cpp
             src/gauss_newton.cpp
             src/symmetric_solver.cpp
+            src/schur_pcg.cpp
     )
 
     target_include_directories(
@@ -159,6 +160,19 @@ if(
             Eigen3::Eigen
     )
 
+    # Matrix-free Schur operator and PCG validation against dense Schur.
+    add_executable(
+        test_schur_pcg
+        tests/test_schur_pcg.cpp
+    )
+
+    target_link_libraries(
+        test_schur_pcg
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
 
     # Dataset benchmark for SparseQR versus SimplicialLDLT on the same J.
     add_executable(
@@ -168,6 +182,20 @@ if(
 
     target_link_libraries(
         benchmark_linear_solvers
+        PRIVATE
+            cora_symforce
+            Eigen3::Eigen
+    )
+
+
+    # Fixed-linearization benchmark for matrix-free Schur PCG P0 versus P1.
+    add_executable(
+        benchmark_schur_pcg
+        apps/benchmark_schur_pcg.cpp
+    )
+
+    target_link_libraries(
+        benchmark_schur_pcg
         PRIVATE
             cora_symforce
             Eigen3::Eigen
@@ -252,6 +280,11 @@ if(
         add_test(
             NAME symmetric_solver
             COMMAND test_symmetric_solver
+        )
+
+        add_test(
+            NAME schur_pcg
+            COMMAND test_schur_pcg
         )
 
     endif()

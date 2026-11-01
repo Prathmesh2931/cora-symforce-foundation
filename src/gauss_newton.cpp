@@ -16,6 +16,7 @@
 
 #include "cora_symforce/graph_linearization.hpp"
 #include "cora_symforce/symforce_pgo_cost.hpp"
+#include "cora_symforce/schur_pcg.hpp"
 
 namespace cora_symforce {
 namespace {
@@ -179,11 +180,11 @@ SparseMatrix buildDampedAugmentedJacobian(
   return augmented;
 }
 
-SparseMatrix removeFirstPoseTranslationColumns(
+SparseMatrix removeFirstTwoTranslationColumns(
     const SparseMatrix& Jf) {
   if (Jf.cols() < 2) {
     throw std::invalid_argument(
-        "Translation Jacobian must contain at least one pose.");
+        "Matrix must contain pose-0 translation columns.");
   }
 
   std::vector<Triplet> triplets;
@@ -244,21 +245,39 @@ Eigen::VectorXd solveSchurReducedStep(
   //
   // lambda = 0 gives the ordinary Gauss-Newton Schur step.
 
-  const SparseMatrix reduced_Jf =
-      removeFirstPoseTranslationColumns(
-          linearization.Jf);
+  const Eigen::Index rotation_columns =
+      linearization.Jc.cols();
 
-  SparseMatrix Hcc =
-      linearization.Jc.transpose() *
-      linearization.Jc;
+  const Eigen::Index full_translation_columns =
+      linearization.Jf.cols();
+
+  if (rotation_columns <= 0 ||
+      full_translation_columns < 2 ||
+      linearization.Hcc.rows() != rotation_columns ||
+      linearization.Hcc.cols() != rotation_columns ||
+      linearization.Hcf.rows() != rotation_columns ||
+      linearization.Hcf.cols() != full_translation_columns ||
+      linearization.Hff.rows() != full_translation_columns ||
+      linearization.Hff.cols() != full_translation_columns) {
+    throw std::invalid_argument(
+        "Inconsistent Hessian block dimensions in dense Schur solve.");
+  }
+
+  const Eigen::Index translation_columns =
+      full_translation_columns - 2;
+
+  // Reuse Hessian blocks assembled by linearizeGraph().
+  // Only remove pose-0 translation gauge coordinates.
+  SparseMatrix Hcc = linearization.Hcc;
 
   const SparseMatrix Hcf =
-      linearization.Jc.transpose() *
-      reduced_Jf;
+      removeFirstTwoTranslationColumns(linearization.Hcf);
 
   SparseMatrix Hff =
-      reduced_Jf.transpose() *
-      reduced_Jf;
+      linearization.Hff.block(
+          2, 2,
+          translation_columns,
+          translation_columns);
 
   Hcc.makeCompressed();
   Hff.makeCompressed();
@@ -270,9 +289,12 @@ Eigen::VectorXd solveSchurReducedStep(
       linearization.Jc.transpose() *
       linearization.residual;
 
-  const Eigen::VectorXd gf =
-      reduced_Jf.transpose() *
+  const Eigen::VectorXd gf_full =
+      linearization.Jf.transpose() *
       linearization.residual;
+
+  const Eigen::VectorXd gf =
+      gf_full.tail(translation_columns);
 
   Eigen::SimplicialLDLT<SparseMatrix> translation_ldlt;
   translation_ldlt.compute(Hff);
@@ -405,6 +427,8 @@ const char* gaussNewtonLinearSolverName(const GaussNewtonLinearSolver solver) {
       return "symmetric_ldlt";
     case GaussNewtonLinearSolver::kSchur:
       return "schur";
+    case GaussNewtonLinearSolver::kSchurPcg:
+      return "schur_pcg";
   }
   return "unknown";
 }
@@ -551,6 +575,11 @@ GaussNewtonResult optimizeGaussNewton(
               J.cols());
 
       rank = reduced.matrix.cols();
+    } else if (
+        options.linear_solver ==
+        GaussNewtonLinearSolver::kSchurPcg) {
+      throw std::invalid_argument(
+          "Matrix-free Schur PCG is currently available for LM only.");
     } else {
       throw std::invalid_argument("Unknown Gauss-Newton linear solver.");
     }
@@ -818,6 +847,9 @@ GaussNewtonResult optimizeLevenbergMarquardt(
     double iteration_solve_ms =
         normal_formation_ms;
 
+    std::size_t total_pcg_iterations = 0;
+    double accepted_pcg_relative_residual = 0.0;
+
     // --------------------------------------------------------
     // LM trust-region trials
     // --------------------------------------------------------
@@ -831,6 +863,8 @@ GaussNewtonResult optimizeLevenbergMarquardt(
       const auto solve_start = Clock::now();
 
       Eigen::VectorXd reduced_delta;
+      std::size_t trial_pcg_iterations = 0;
+      double trial_pcg_relative_residual = 0.0;
 
       if (options.linear_solver ==
           GaussNewtonLinearSolver::kSparseQr) {
@@ -916,6 +950,30 @@ GaussNewtonResult optimizeLevenbergMarquardt(
 
         rank = Jr.cols();
 
+      } else if (
+          options.linear_solver ==
+          GaussNewtonLinearSolver::kSchurPcg) {
+        const SchurPcgResult pcg_result =
+            solveSchurPcgReducedStep(
+                linearization,
+                damping,
+                options.schur_pcg);
+
+        reduced_delta = pcg_result.reduced_delta;
+        trial_pcg_iterations = pcg_result.iterations;
+        trial_pcg_relative_residual =
+            pcg_result.relative_residual;
+
+        total_pcg_iterations += trial_pcg_iterations;
+
+        if (reduced_delta.size() != Jr.cols() ||
+            !vectorIsFinite(reduced_delta)) {
+          throw std::runtime_error(
+              "Matrix-free Schur PCG produced an invalid step.");
+        }
+
+        rank = Jr.cols();
+
       } else {
         throw std::invalid_argument(
             "Unknown LM linear solver.");
@@ -955,6 +1013,8 @@ GaussNewtonResult optimizeLevenbergMarquardt(
             damping,
             0.0,
             trials_used,
+            total_pcg_iterations,
+            trial_pcg_relative_residual,
         });
 
         if (options.record_trajectory_history) {
@@ -1023,6 +1083,8 @@ GaussNewtonResult optimizeLevenbergMarquardt(
         accepted_poses = candidate;
         accepted_step_norm = step_norm;
         accepted_gain_ratio = gain_ratio;
+        accepted_pcg_relative_residual =
+            trial_pcg_relative_residual;
 
         // Standard LM gain-ratio damping update.
         const double update =
@@ -1080,6 +1142,8 @@ GaussNewtonResult optimizeLevenbergMarquardt(
         accepted_damping,
         accepted_gain_ratio,
         trials_used,
+        total_pcg_iterations,
+        accepted_pcg_relative_residual,
     });
 
     result.poses =

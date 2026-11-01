@@ -8,6 +8,7 @@
 
 #include "cora_symforce/measurement.hpp"
 #include "cora_symforce/pose2.hpp"
+#include "cora_symforce/schur_pcg.hpp"
 
 namespace cora_symforce {
 
@@ -15,6 +16,7 @@ enum class GaussNewtonLinearSolver {
   kSparseQr,
   kSymmetricLdlt,
   kSchur,
+  kSchurPcg,
 };
 
 const char* gaussNewtonLinearSolverName(GaussNewtonLinearSolver solver);
@@ -52,6 +54,12 @@ struct GaussNewtonIteration {
   double damping = 0.0;
   double gain_ratio = 0.0;
   std::size_t trial_count = 0;
+
+  // Matrix-free Schur-PCG diagnostics. Zero for other backends.
+  // pcg_iterations counts work across all LM trials in this iteration;
+  // pcg_relative_residual is from the accepted trial.
+  std::size_t pcg_iterations = 0;
+  double pcg_relative_residual = 0.0;
 };
 
 struct LevenbergMarquardtOptions {
@@ -75,6 +83,8 @@ struct LevenbergMarquardtOptions {
 
   GaussNewtonLinearSolver linear_solver =
       GaussNewtonLinearSolver::kSymmetricLdlt;
+
+  SchurPcgOptions schur_pcg;
 
   bool record_trajectory_history = false;
 };

@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -30,14 +32,15 @@ void writeIterationSummary(
 
   out << std::setprecision(17);
   out << "iteration,cost,gradient_norm,step_norm,alpha,damping,"
-         "gain_ratio,trial_count,linearization_ms,solve_ms,"
+         "gain_ratio,trial_count,pcg_iterations,pcg_relative_residual,"
+         "linearization_ms,solve_ms,"
          "cumulative_linearization_ms,cumulative_solve_ms\n";
 
   double cumulative_linearization = 0.0;
   double cumulative_solve = 0.0;
 
   out << 0 << ',' << result.initial_cost
-      << ",0,0,0,0,0,0,0,0,0,0\n";
+      << ",0,0,0,0,0,0,0,0,0,0,0,0\n";
 
   for (const auto& iteration : result.iterations) {
     cumulative_linearization += iteration.linearization_time_ms;
@@ -51,6 +54,8 @@ void writeIterationSummary(
         << iteration.damping << ','
         << iteration.gain_ratio << ','
         << iteration.trial_count << ','
+        << iteration.pcg_iterations << ','
+        << iteration.pcg_relative_residual << ','
         << iteration.linearization_time_ms << ','
         << iteration.solve_time_ms << ','
         << cumulative_linearization << ','
@@ -152,6 +157,10 @@ int main(int argc, char** argv) {
     lm_schur_options.linear_solver =
         GaussNewtonLinearSolver::kSchur;
 
+    LevenbergMarquardtOptions lm_schur_pcg_options = lm_qr_options;
+    lm_schur_pcg_options.linear_solver =
+        GaussNewtonLinearSolver::kSchurPcg;
+
     // All four optimizers start from exactly the same trajectory.
     const GaussNewtonResult qr = optimizeGaussNewton(
         initialization.poses, dataset.measurements, qr_options);
@@ -168,11 +177,18 @@ int main(int argc, char** argv) {
     const GaussNewtonResult lm_schur = optimizeLevenbergMarquardt(
         initialization.poses, dataset.measurements, lm_schur_options);
 
+    const GaussNewtonResult lm_schur_pcg =
+        optimizeLevenbergMarquardt(
+            initialization.poses,
+            dataset.measurements,
+            lm_schur_pcg_options);
+
     writeSolverOutputs(output_dir, "gn_qr", qr);
     writeSolverOutputs(output_dir, "gn_ldlt", ldlt);
     writeSolverOutputs(output_dir, "lm_qr", lm_qr);
     writeSolverOutputs(output_dir, "lm_ldlt", lm_ldlt);
     writeSolverOutputs(output_dir, "lm_schur", lm_schur);
+    writeSolverOutputs(output_dir, "lm_schur_pcg", lm_schur_pcg);
 
     std::ofstream meta(output_dir / "metadata.txt");
     if (!meta) {
@@ -204,6 +220,22 @@ int main(int argc, char** argv) {
                << result.total_linearization_time_ms << '\n';
           meta << prefix << "_total_solve_ms="
                << result.total_solve_time_ms << '\n';
+
+          std::size_t pcg_iterations = 0;
+          double maximum_pcg_residual = 0.0;
+
+          for (const auto& iteration : result.iterations) {
+            pcg_iterations += iteration.pcg_iterations;
+            maximum_pcg_residual = std::max(
+                maximum_pcg_residual,
+                iteration.pcg_relative_residual);
+          }
+
+          meta << prefix << "_total_pcg_iterations="
+               << pcg_iterations << '\n';
+
+          meta << prefix << "_maximum_pcg_relative_residual="
+               << maximum_pcg_residual << '\n';
         };
 
     write_meta("gn_qr", qr);
@@ -211,6 +243,7 @@ int main(int argc, char** argv) {
     write_meta("lm_qr", lm_qr);
     write_meta("lm_ldlt", lm_ldlt);
     write_meta("lm_schur", lm_schur);
+    write_meta("lm_schur_pcg", lm_schur_pcg);
 
     std::cout << std::setprecision(15);
 
@@ -286,6 +319,17 @@ int main(int argc, char** argv) {
 
     std::cout << "LM LDLT/Schur final cost gap: "
               << lm_schur_cost_gap << '\n';
+
+    std::cout << "LM Schur PCG final cost       : "
+              << lm_schur_pcg.final_cost << '\n';
+
+    std::cout << "LM LDLT/PCG final cost gap    : "
+              << std::abs(
+                     lm_ldlt.final_cost - lm_schur_pcg.final_cost)
+              << '\n';
+
+    std::cout << "LM Schur PCG solve time [ms]  : "
+              << lm_schur_pcg.total_solve_time_ms << '\n';
 
     std::cout << "Trace export complete.\n";
 
